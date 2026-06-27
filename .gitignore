@@ -1,0 +1,23 @@
+# API key — never commit this
+.env
+
+# Per-flight pipeline output (generated at runtime)
+runs/
+uploads/
+
+# Large downloaded CSV (auto-downloads on first run)
+data/airports_raw.csv
+
+# Generated JSON outputs (re-created by the pipeline)
+data/airports.json
+data/fir_notams.json
+data/flight_info.json
+data/route.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store

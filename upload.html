@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Preflight Briefing Decoder</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      background: #0d1117;
+      color: #c9d1d9;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 2rem;
+    }
+    .card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      padding: 2.5rem 3rem;
+      width: 100%;
+      max-width: 520px;
+    }
+    h1 { color: #58a6ff; font-size: 1.4rem; margin: 0 0 0.3rem; }
+    .subtitle { color: #8b949e; font-size: 0.875rem; margin: 0 0 2rem; }
+    .field { margin-bottom: 1.25rem; }
+    label {
+      display: block;
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: #c9d1d9;
+      margin-bottom: 0.35rem;
+    }
+    label span { color: #8b949e; font-weight: 400; }
+    input[type="file"] {
+      width: 100%;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      color: #c9d1d9;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.85rem;
+      cursor: pointer;
+    }
+    input[type="file"]:hover { border-color: #58a6ff; }
+    button {
+      width: 100%;
+      margin-top: 0.5rem;
+      padding: 0.75rem;
+      background: #238636;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover { background: #2ea043; }
+    .note {
+      margin-top: 1.25rem;
+      font-size: 0.75rem;
+      color: #6e7681;
+      text-align: center;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Preflight Briefing Decoder</h1>
+    <p class="subtitle">Thai Airways B777 — select the three dispatch PDFs for any flight</p>
+
+    <form method="POST" action="/upload" enctype="multipart/form-data">
+      <div class="field">
+        <label>OFP <span>— Operational Flight Plan</span></label>
+        <input type="file" name="ofp" accept=".pdf" required>
+      </div>
+      <div class="field">
+        <label>MET <span>— Dispatch Weather Package</span></label>
+        <input type="file" name="met" accept=".pdf" required>
+      </div>
+      <div class="field">
+        <label>NOTAM <span>— Official Pilot Briefing</span></label>
+        <input type="file" name="notam" accept=".pdf" required>
+      </div>
+      <button type="submit">Process Flight</button>
+    </form>
+
+    <p class="note">
+      Processing takes ~2 minutes (AI NOTAM summaries).<br>
+      Files are processed locally and not transmitted to third parties.
+    </p>
+  </div>
+</body>
+</html>
