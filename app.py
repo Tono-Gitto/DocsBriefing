@@ -37,6 +37,8 @@ sys.path.insert(0, HERE)  # ensure "import parse_ofp" etc. resolve from this dir
 
 UPLOAD_DIR = os.path.join(HERE, "uploads")
 RUNS_DIR   = os.path.join(HERE, "runs")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(RUNS_DIR,   exist_ok=True)
 
 app = Flask(__name__, static_folder=None)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB upload cap
@@ -453,6 +455,5 @@ _PROGRESS_HTML = """<!doctype html>
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-    os.makedirs(RUNS_DIR, exist_ok=True)
-    app.run(host="127.0.0.1", port=5001, debug=False, threaded=True)
+    port = int(os.environ.get("PORT", 5001))
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
