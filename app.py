@@ -19,8 +19,10 @@ Security:
 import json
 import os
 import re
+import shutil
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -297,6 +299,8 @@ def _run_pipeline(run_id, ofp_path, met_path, notam_path):
             _current_run["status"] = "error"
             _current_run["error"]  = str(exc)
         traceback.print_exc()
+    finally:
+        shutil.rmtree(os.path.dirname(ofp_path), ignore_errors=True)
 
 
 # ── Flask routes ──────────────────────────────────────────────────────────────
@@ -316,6 +320,16 @@ def upload_files():
     with _lock:
         if _current_run["status"] == "running":
             return "A pipeline is already running. Please wait for it to finish.", 429
+
+    # Sweep run dirs older than 24 h
+    cutoff = time.time() - 86400
+    for name in os.listdir(RUNS_DIR):
+        path = os.path.join(RUNS_DIR, name)
+        try:
+            if os.path.isdir(path) and os.stat(path).st_mtime < cutoff:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
 
     for field in ("ofp", "met", "notam"):
         f = request.files.get(field)
