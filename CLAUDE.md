@@ -26,9 +26,9 @@ cd mvp && python3 -m http.server 8000
 
 **Install dependencies:**
 ```bash
-pip install -r requirements-app.txt   # Flask app (flask, python-dotenv, pdfplumber, anthropic, requests)
-pip install -r requirements.txt       # CLI scripts only (pdfplumber, requests)
+pip install -r requirements.txt   # all packages: flask, gunicorn, python-dotenv, pdfplumber, anthropic, requests
 ```
+`requirements-app.txt` mirrors the same set and is kept for reference. `requirements.txt` is what Railway's build system (`railpack`) auto-detects and installs.
 
 **CLI scripts (dev/debug only — not needed when using Flask):**
 ```bash
@@ -75,7 +75,7 @@ runs/<uuid>/             ← pipeline output per flight
 - Fetches `data/route.json`, `data/airports.json`, `data/fir_notams.json` relative to where it's served
 - Flask serves these from the active run dir via `GET /data/<f>` (falls back to `data/` for the legacy MVP)
 - Leaflet map layers: blue polyline (route) → circle markers (MET airports) → diamond markers (FIR NOTAMs)
-- FIR diamond color: T1=red, T2=orange, T3=dark gray. Uses `notams[0].tier` after sort-ascending, so lowest tier number drives the color.
+- FIR diamond color: **red** only when the FIR has at least one T1 NOTAM (RESTRICTED AREA ACTIVE / DANGER AREA ACTIVE / ROUTE NOT AVBL — the route-blocking conditions); **near-black** (`#1a1a2e`) for everything else. T2 navaid outages do NOT color the diamond — they appear as T2 badges in the panel list only. Logic: `f.notams.some(n => n.tier === 1) ? "#ff8080" : "#1a1a2e"`. The white SVG border on `firIcon` keeps black diamonds visible on dark map tiles.
 - **Runway chips** (`buildChips(runway_info, notams)`): renders runway/length pairs as styled chips in the panel header. Chips with T1/T2 NOTAMs referencing that runway glow red/orange. Matching uses suffix-aware logic against `n.summary + n.body` via regex `\bRWY\s+(\d{2}[LCR]?(?:\/\d{2}[LCR]?)?)`: if the captured token carries an L/C/R suffix it must match the chip's exact ends (prevents `04L` from matching the `04R/22L` chip); if the token is bare (e.g. `"RWY 04"`) it matches any chip sharing that numeric designator.
 - **Runway filter** (`filterNotams(ids, rwy)` / `clearNotamFilter()`): tapping a highlighted chip filters the NOTAM list to matched rows only. State is kept in `_activeRwyFilter`. The onclick attribute uses single-quoted outer quotes so `JSON.stringify` double-quotes inside are safe.
 
@@ -174,6 +174,18 @@ Three PDFs per flight, Thai Airways dispatch format:
 - **OFP** — Per-waypoint table (lat/lon + ACCT elapsed time), ETD, taxi time, flight time, aircraft/reg.
 - **MET** — One block per airport: `ICAO -IATA - NAME` header, runway line (`RWY/RWY length_m ...`), `SA ...=` METAR, `FT ...=` TAF (terminated by `=`, may wrap lines). Covers departure, destination, alternates, ~40 enroute contingency airports. The runway line may span two physical PDF lines for airports with 5+ runways.
 - **NOTAM** — NOTAMs already decoded to plain English (no raw Q-codes). Sections: `GENERAL INFORMATION`, `FLIGHT LEG INFORMATION`, `AERODROME INFORMATION` (sub-headed by airport), `ENROUTE INFORMATION` (FIR NOTAMs), `ADDITIONAL INFORMATION`. Each NOTAM has an ID, optional `*validity-window*` line, and free-text body.
+
+---
+
+## Deployment
+
+Hosted on Railway at **https://web-production-2ec19.up.railway.app** (project: DocsBriefing).
+
+`Procfile` defines the start command: `gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120`. Single worker is required — the background pipeline state (`_runs` dict) is in-process and would break across multiple workers.
+
+`app.py` binds to `0.0.0.0` and reads `$PORT` from the environment (falls back to 5001 locally). `ANTHROPIC_API_KEY` is set as a Railway environment variable — not in the repo.
+
+**Deploy workflow:** push to `main` → Railway auto-detects, rebuilds, and does a rolling redeploy. No manual steps needed. `nixpacks.toml` is present but currently unused (Railway uses railpack instead).
 
 ---
 
