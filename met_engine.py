@@ -187,26 +187,37 @@ def condense_taf(taf_raw, ref_dt):
     """
     Returns (base_str, becmg_in_progress|None, [active_overlays]).
     BECMG/FM completed before ref_dt fold into the baseline.
+    Overlays cover the OM-A §8.1.7.4.1(7) window: ETA ±1h.
     """
     base_text, groups = _parse_groups(taf_raw)
-    ref_min = ref_dt.day * 1440 + ref_dt.hour * 60 + ref_dt.minute
-    baseline = base_text
+    ref_min   = ref_dt.day * 1440 + ref_dt.hour * 60 + ref_dt.minute
+    win_start = ref_min - 60
+    win_end   = ref_min + 60
+    baseline  = base_text
     becmg_prog = None
-    overlays = []
+    overlays   = []
 
     for g in sorted(groups, key=lambda x: x["start"]):
         t = g["type"]
+        s = g["start"]
+        e = g["end"] if g["end"] is not None else float("inf")
+
         if t == "BECMG" or t.startswith("FM"):
-            if g["end"] is None:          # FM: complete once past start
-                if ref_min >= g["start"]:
+            if g["end"] is None:              # FM: complete once past start
+                if ref_min >= s:
                     baseline = g["text"]
+                elif s < win_end:             # FM starts within +1h → overlay
+                    overlays.append(g)
             else:
                 if ref_min >= g["end"]:
-                    baseline = g["text"]  # transition complete → fold
-                elif g["start"] <= ref_min < g["end"]:
-                    becmg_prog = g        # in progress right now
+                    baseline = g["text"]      # transition complete → fold
+                elif s <= ref_min < g["end"]:
+                    becmg_prog = g            # in progress right now
+                elif s > ref_min and s < win_end:
+                    overlays.append(g)        # upcoming within +1h
         else:  # TEMPO / PROB30 TEMPO / PROB40 TEMPO / bare PROB
-            if g["end"] is not None and g["start"] <= ref_min < g["end"]:
+            # Show if group overlaps with [ETA−1h, ETA+1h]
+            if s < win_end and e > win_start:
                 overlays.append(g)
 
     becmg_out = (
@@ -215,7 +226,8 @@ def condense_taf(taf_raw, ref_dt):
         if becmg_prog else None
     )
     overlay_out = [
-        {"type": g["type"], "text": g["text"],
+        {"type": "FM" if g["type"].startswith("FM") else g["type"],
+         "text": g["text"],
          "window": _fmt_window(g["start"], g["end"])}
         for g in overlays
     ]
