@@ -235,7 +235,7 @@ def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeo
                 if leg_local == 1:
                     _progress(f"  WARN: no centroid for FIR {fir_icao} ({fir_data['name']}) — skipped")
                 continue
-            ref_dt, _, wp_lat, wp_lon = notam_engine._nearest_waypoint(
+            ref_dt, _, _, _ = notam_engine._nearest_waypoint(
                 coords[0], coords[1], route_pts
             )
             active_fir = [
@@ -248,7 +248,7 @@ def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeo
             if fir_icao not in fir_merged:
                 fir_merged[fir_icao] = {
                     "fir":  fir_icao, "name": fir_data["name"],
-                    "lat":  round(wp_lat, 4), "lon": round(wp_lon, 4),
+                    "lat":  round(coords[0], 4), "lon": round(coords[1], 4),
                     "legs": [leg_fir],
                 }
             else:

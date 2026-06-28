@@ -210,7 +210,7 @@ NOTAMs are attributed to airports by the **section header** (` VTBS / BKK`) they
 
 ### FIR centroid table
 
-`notam_engine.FIR_COORDS` (141 entries) covers worldwide corridors. Centroids are approximate — they're haversine search targets only; the FIR marker is placed at the nearest route waypoint, not at the centroid. Any FIR code found in the NOTAM PDF but missing from `FIR_COORDS` prints a warning and is skipped. Add missing FIRs directly to `FIR_COORDS` in `notam_engine.py`.
+`notam_engine.FIR_COORDS` (141 entries) covers worldwide corridors. Centroids are used as both the haversine search target (to find the nearest route waypoint for `ref_time`) and as the map marker position. Placing the diamond at the centroid avoids it being buried under an airport circle when the departure or destination airport happens to be the nearest waypoint (e.g. turnaround flights). Any FIR code found in the NOTAM PDF but missing from `FIR_COORDS` prints a warning and is skipped. Add missing FIRs directly to `FIR_COORDS` in `notam_engine.py`.
 
 `app.py` no longer has a separate `_EXTRA_FIR_COORDS` — everything is in `notam_engine.FIR_COORDS`.
 
