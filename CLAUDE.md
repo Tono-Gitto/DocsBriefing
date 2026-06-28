@@ -42,46 +42,99 @@ CLI scripts have **hardcoded TG921 paths and TAKEOFF_UTC** at module level. The 
 
 ## Architecture
 
+### Multi-leg / Multi-group model
+
+The upload form accepts **1–4 OFP files** (legs). The pipeline groups them:
+- **1–2 legs** → single group (group 1), single map tab
+- **3–4 legs** → two groups (group 1 = legs 1–2, group 2 = legs 3–4), opens two map tabs
+
+Each group gets its own output directory. The map URL uses `?g=1` or `?g=2` to select which group to display.
+
+### Directory layout
+
 ```
-uploads/<uuid>/          ← PDFs saved here per upload (not browseable)
-  ofp.pdf, met.pdf, notam.pdf
+uploads/<uuid>/          ← PDFs held here during pipeline only; deleted in finally block
+  ofp_1.pdf, ofp_2.pdf, ..., met.pdf, notam.pdf
 
-runs/<uuid>/             ← pipeline output per flight
-  flight_info.json       {flight, dep, dest, acft, reg, date, etd, eta}
-  route.json             [{name, lat, lon, acct_min}, ...]  (acct_min = minutes since takeoff)
-  airports.json          [{icao, iata, name, runway_info, lat, lon, ref_time, dist_nm,
-                           metar, taf_base, becmg_in_progress, active_overlays,
-                           notams[], notam_covered}, ...]
-  fir_notams.json        [{fir, name, lat, lon, ref_time, notams[]}, ...]
+runs/<uuid>/             ← pipeline output (swept after 24 h on next upload)
+  1/                     ← group 1
+    flight_info.json     {legs: [{flight, dep, dest, acft, reg, date, etd, eta}, ...]}
+    route_1.json         [{name, lat, lon, acct_min}, ...]  leg 1 waypoints
+    route_2.json         leg 2 waypoints (if present)
+    airports.json        see schema below
+    fir_notams.json      see schema below
+  2/                     ← group 2 (only when 3–4 legs uploaded)
+    ...
 ```
 
-`runway_info` is a raw string from the MET PDF's second line (after the airport header, before `SA`), e.g. `"01/19 4000 02L/20R 4000 02R/20L 3700"`. Values are runway designator pairs + length in metres. Airports with 5+ runways may wrap across two lines; the parser accumulates them with a space join.
+### JSON schemas
 
-**Flask app (`app.py`) — the orchestrator:**
-- Extracts `(etd_utc, taxi_min, flight_time_min)` from OFP on upload via `_extract_ofp_constants()`
-- Computes `takeoff_utc = etd_utc + timedelta(minutes=taxi_min)`
-- Runs the 4-step pipeline in a background thread, streaming progress via `GET /api/status/<id>`
-- **Monkey-patches module-level constants** before calling each engine's `main()`:
-  ```python
-  parse_ofp.OFP_PDF  = ofp_path
-  met_engine.TAKEOFF_UTC = takeoff_utc
-  notam_engine.TAKEOFF_UTC = takeoff_utc
-  ```
-  This is how per-flight isolation works — the CLI scripts have hardcoded TG921 values, the Flask pipeline overrides them. Do not "fix" the hardcoded constants in the CLI scripts; they serve as the regression fixture.
+**`airports.json`** — list of airports, each with per-leg weather and NOTAMs:
+```json
+[{
+  "icao": "VTBS", "iata": "BKK", "name": "...",
+  "lat": 13.68, "lon": 100.75,
+  "runway_info": "01L/19R 4000 01R/19L 3700",
+  "metar": "VTBS ...",
+  "dist_nm": 45,
+  "legs": [{
+    "leg": 1,
+    "ref_time": "2326Z",
+    "taf_base": "24008KT 9999 SCT020",
+    "becmg_in_progress": null,
+    "active_overlays": [],
+    "notams": [{"id": "...", "tier": 1, "body": "...", "summary": "...", "window": "..."}],
+    "notam_covered": true
+  }]
+}]
+```
 
-**`_run_notam_step()` in `app.py`** replaces `notam_engine.main()` entirely — it calls the library functions directly so it can inject `takeoff_utc`, write to the run-specific directory, and AI-summarise both airport and FIR NOTAMs in batch.
+**`fir_notams.json`** — list of FIRs that have active NOTAMs, each with per-leg entries:
+```json
+[{
+  "fir": "VTBB", "name": "Bangkok FIR",
+  "lat": 13.4, "lon": 100.6,
+  "legs": [{"leg": 1, "ref_time": "2315Z", "notams": [...]}]
+}]
+```
 
-**Map (`index.html`) — no build step:**
-- Fetches `data/route.json`, `data/airports.json`, `data/fir_notams.json` relative to where it's served
-- Flask serves these from the active run dir via `GET /data/<f>` (falls back to `data/` for the legacy MVP)
-- Leaflet map layers: blue polyline (route) → circle markers (MET airports) → diamond markers (FIR NOTAMs)
-- FIR diamond color: **red** only when the FIR has at least one T1 NOTAM (RESTRICTED AREA ACTIVE / DANGER AREA ACTIVE / ROUTE NOT AVBL — the route-blocking conditions); **near-black** (`#1a1a2e`) for everything else. T2 navaid outages do NOT color the diamond — they appear as T2 badges in the panel list only. Logic: `f.notams.some(n => n.tier === 1) ? "#ff8080" : "#1a1a2e"`. The white SVG border on `firIcon` keeps black diamonds visible on dark map tiles.
-- **Runway chips** (`buildChips(runway_info, notams)`): renders runway/length pairs as styled chips in the panel header. Chips with T1/T2 NOTAMs referencing that runway glow red/orange. Matching uses suffix-aware logic against `n.summary + n.body` via regex `\bRWY\s+(\d{2}[LCR]?(?:\/\d{2}[LCR]?)?)`: if the captured token carries an L/C/R suffix it must match the chip's exact ends (prevents `04L` from matching the `04R/22L` chip); if the token is bare (e.g. `"RWY 04"`) it matches any chip sharing that numeric designator.
-- **Runway filter** (`filterNotams(ids, rwy)` / `clearNotamFilter()`): tapping a highlighted chip filters the NOTAM list to matched rows only. State is kept in `_activeRwyFilter`. The onclick attribute uses single-quoted outer quotes so `JSON.stringify` double-quotes inside are safe.
+**`flight_info.json`** — `{legs: [{flight, dep, dest, acft, reg, date, etd, eta}]}`
 
-**`upload.html`** is the Flask-served upload page (`GET /`). It posts the three PDFs to `POST /upload` which kicks off the background pipeline.
+### Flask app (`app.py`) — the orchestrator
 
-**`airport_coords.py`** — downloads and caches the OurAirports CSV (`data/airports_raw.csv`) and exposes `load_coords() → {icao: (lat, lon)}`. Used by `met_engine.py` to look up coordinates for each MET airport before computing ref_time. Auto-downloads on first run; subsequent runs use the cached file.
+Pipeline runs in a background thread; progress streamed via `GET /api/status/<id>`.
+
+**6-step pipeline per group:**
+1. **OFP constants** — extract `(etd_utc, taxi_min, flt_min)` and `flight_info` per leg via `_extract_ofp_constants()` / `_extract_flight_info()`
+2. **Route parsing** — monkey-patches `parse_ofp.OFP_PDF`, `parse_ofp.OUT_JSON`, `parse_ofp.FLIGHT_TIME_MIN`, calls `parse_ofp.main()` → writes `route_<n>.json`
+3. **MET per leg** — monkey-patches `met_engine.MET_PDF`, `met_engine.ROUTE_JSON`, `met_engine.TAKEOFF_UTC`, `met_engine.OUT_JSON`, calls `met_engine.main()` → writes temporary `_airports_leg_<n>.json`
+4. **Merge** — `_merge_airports_legs()` collapses per-leg airport lists into the multi-leg schema (one entry per ICAO with a `legs` array)
+5. **NOTAM** — `_run_notam_step_multi()` attaches per-leg NOTAMs, AI-summarises all, writes `airports.json` and `fir_notams.json`
+6. **flight_info.json** — written last
+
+**Monkey-patching** is how per-flight isolation works — do not "fix" the hardcoded constants in the CLI scripts; they are the regression fixture.
+
+**Data routes:**
+- `GET /data/<group>/<filename>` — serves from `runs/<run_id>/<group>/`
+- `GET /data/<filename>` — legacy fallback, serves from `data/` (MVP demo only)
+
+**Concurrency:** Single worker required — `_current_run` dict is in-process. A second upload while a pipeline is running returns 429.
+
+### Map (`index.html`) — no build step
+
+- URL param `?g=1` or `?g=2` selects the group; all data fetches go to `/data/<GROUP>/<file>`.
+- **Leg route colors:** leg 1 = blue (`#5b9ef4`), leg 2 = orange (`#f4a15b`).
+- **Marker colors:** green = departure, red = destination, amber = turnaround (dep and dest same airport), light blue = enroute MET.
+- **Multi-leg panel:** when an airport appears in multiple legs, the side panel shows a `LEG N · HHMMZ` divider between leg sections.
+- **FIR diamond color:** red (`#ff8080`) when the FIR has at least one T1 NOTAM; near-black (`#1a1a2e`) otherwise. Logic: `f.legs.flatMap(l => l.notams).some(n => n.tier === 1)`. T2 navaid outages appear as T2 badges only.
+- **T3 NOTAM collapse:** FIR panel shows first 5 T3 NOTAMs then a "show N more" toggle.
+- **Runway chips** (`buildChips(runway_info, allNotams)`): glow red/orange when a T1/T2 NOTAM references that runway. Matching is suffix-aware — `04L` matches only chips with that exact end; bare `RWY 04` matches any chip sharing that numeric designator.
+- **Runway filter** (`filterNotams(ids, rwy)` / `clearNotamFilter()`): tapping a highlighted chip filters NOTAMs across all leg sections. State kept in `_activeRwyFilter`.
+- Both `legs`-schema and legacy flat schema are handled in `buildPanel()` / `buildFirPanel()`.
+
+**`upload.html`** is the Flask-served upload page (`GET /`). Supports dynamically adding/removing legs 2–4 via JS.
+
+**`airport_coords.py`** — downloads and caches the OurAirports CSV (`data/airports_raw.csv`) and exposes `load_coords() → {icao: (lat, lon)}`. Used by `met_engine.py` to look up coordinates for each MET airport. Auto-downloads on first run.
 
 **`parse_met.py`** is a legacy script (pre-TAF-condensing, no runway_info). Superseded by `met_engine.py`; kept for historical reference only.
 
@@ -163,7 +216,7 @@ NOTAMs are attributed to airports by the **section header** (` VTBS / BKK`) they
 
 ### AI summarisation
 
-`notam_engine._summarize_notams()` batches all NOTAMs (airport + FIR) into Anthropic API calls. The Flask pipeline calls this once for airport NOTAMs and once for FIR NOTAMs after time-filtering. Running this step without an API key will raise an auth error.
+`notam_engine._summarize_notams()` batches all NOTAMs (airport + FIR) into Anthropic API calls. `_run_notam_step_multi()` calls this once for airport NOTAMs and once for FIR NOTAMs, deduplicating across legs before sending. Running this step without an API key will raise an auth error.
 
 ---
 

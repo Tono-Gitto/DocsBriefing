@@ -46,7 +46,10 @@ app = Flask(__name__, static_folder=None)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB upload cap
 
 _lock = threading.Lock()
-_current_run: dict = {"run_id": None, "status": "idle", "messages": [], "error": None}
+_current_run: dict = {
+    "run_id": None, "status": "idle", "messages": [], "error": None,
+    "leg_count": 1, "group_count": 1,
+}
 
 
 # ── OFP constant extraction ───────────────────────────────────────────────────
@@ -140,96 +143,135 @@ def _fmt_win(n):
     )
 
 
-# FIR centroids are now fully maintained in notam_engine.FIR_COORDS (worldwide coverage).
+# ── Multi-leg helpers ─────────────────────────────────────────────────────────
 
-# ── NOTAM orchestrator (replaces notam_engine.main()) ────────────────────────
+def _merge_airports_legs(leg_airports_list):
+    """Merge per-leg airports.json lists into one list with a `legs` array per airport."""
+    from collections import OrderedDict
+    merged = OrderedDict()
+    for leg_idx, airports in enumerate(leg_airports_list, start=1):
+        for ap in airports:
+            icao = ap["icao"]
+            leg_entry = {
+                "leg":               leg_idx,
+                "ref_time":          ap.get("ref_time", "0000Z"),
+                "taf_base":          ap.get("taf_base"),
+                "becmg_in_progress": ap.get("becmg_in_progress"),
+                "active_overlays":   ap.get("active_overlays", []),
+            }
+            if icao not in merged:
+                merged[icao] = {
+                    "icao":        ap["icao"],
+                    "iata":        ap.get("iata", ""),
+                    "name":        ap.get("name", ""),
+                    "lat":         ap.get("lat"),
+                    "lon":         ap.get("lon"),
+                    "runway_info": ap.get("runway_info"),
+                    "metar":       ap.get("metar"),
+                    "dist_nm":     ap.get("dist_nm"),
+                    "legs":        [leg_entry],
+                }
+            else:
+                merged[icao]["legs"].append(leg_entry)
+    return list(merged.values())
 
-def _run_notam_step(notam_path, run_dir, takeoff_utc):
-    """
-    Calls notam_engine library functions directly so we can pass takeoff_utc.date()
-    for ref_dt construction, avoiding the hardcoded 2026-06-20 literal in
-    notam_engine.main() line 416.
-    """
+
+def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeoffs):
+    """Attach per-leg NOTAMs to airports; write airports.json and fir_notams.json."""
     import notam_engine
 
-    # Monkeypatch TAKEOFF_UTC so _nearest_waypoint computes correct FIR ref times
-    notam_engine.TAKEOFF_UTC = takeoff_utc
-
-    airports_json = os.path.join(run_dir, "airports.json")
-    route_json    = os.path.join(run_dir, "route.json")
-    fir_json      = os.path.join(run_dir, "fir_notams.json")
-
-    with open(airports_json) as f:
-        airports = json.load(f)
-    with open(route_json) as f:
-        route_pts = json.load(f)
-
     notam_db, fir_db = notam_engine.parse_notam_pdf(notam_path)
-    flight_date = takeoff_utc.date()
 
-    # ── Airport NOTAMs ────────────────────────────────────────────────────────
+    # ── Airport NOTAMs per leg ────────────────────────────────────────────────
     for ap in airports:
-        ref_str = ap.get("ref_time", "0000Z").rstrip("Z")
-        ref_dt  = datetime(
-            flight_date.year, flight_date.month, flight_date.day,
-            int(ref_str[:2]), int(ref_str[2:]),
-            tzinfo=timezone.utc,
-        )
-        raw = notam_db.get(ap["icao"], [])
-        active = [
-            {"id": n["id"], "tier": n["tier"], "body": n["body"], "window": _fmt_win(n)}
-            for n in raw
-            if notam_engine._is_active(n["win_start"], n["win_end"], ref_dt)
-        ]
-        active.sort(key=lambda x: x["tier"])
-        ap["notams"]        = active
-        ap["notam_covered"] = ap["icao"] in notam_db
+        for leg_entry in ap["legs"]:
+            takeoff_utc = leg_takeoffs[leg_entry["leg"] - 1]
+            flight_date = takeoff_utc.date()
+            ref_str = leg_entry.get("ref_time", "0000Z").rstrip("Z")
+            ref_dt = datetime(
+                flight_date.year, flight_date.month, flight_date.day,
+                int(ref_str[:2]), int(ref_str[2:]),
+                tzinfo=timezone.utc,
+            )
+            raw = notam_db.get(ap["icao"], [])
+            active = [
+                {"id": n["id"], "tier": n["tier"], "body": n["body"], "window": _fmt_win(n)}
+                for n in raw
+                if notam_engine._is_active(n["win_start"], n["win_end"], ref_dt)
+            ]
+            active.sort(key=lambda x: x["tier"])
+            leg_entry["notams"]        = active
+            leg_entry["notam_covered"] = ap["icao"] in notam_db
 
+    # AI summaries — deduplicated across legs
+    to_sum = {}
+    for ap in airports:
+        for leg_entry in ap["legs"]:
+            for n in leg_entry.get("notams", []):
+                to_sum.setdefault(ap["icao"], {})[n["id"]] = n
     summaries = notam_engine._summarize_notams(
-        {ap["icao"]: ap["notams"] for ap in airports if ap.get("notams")}
+        {icao: list(nm.values()) for icao, nm in to_sum.items()}
     )
     for ap in airports:
-        for n in ap.get("notams", []):
-            n["summary"] = summaries.get((ap["icao"], n["id"]), n["body"].split("\n")[0])
+        for leg_entry in ap["legs"]:
+            for n in leg_entry.get("notams", []):
+                n["summary"] = summaries.get((ap["icao"], n["id"]), n["body"].split("\n")[0])
 
-    with open(airports_json, "w") as f:
+    with open(os.path.join(group_dir, "airports.json"), "w") as f:
         json.dump(airports, f, indent=2)
 
-    # ── FIR NOTAMs ────────────────────────────────────────────────────────────
-    fir_out = []
-    for fir_icao, fir_data in fir_db.items():
-        coords = notam_engine.FIR_COORDS.get(fir_icao)
-        if not coords:
-            _progress(f"  WARN: no centroid for FIR {fir_icao} ({fir_data['name']}) — skipped")
-            continue
-        ref_dt, _, wp_lat, wp_lon = notam_engine._nearest_waypoint(
-            coords[0], coords[1], route_pts
-        )
-        active_fir = [
-            {"id": n["id"], "tier": n["tier"], "body": n["body"], "window": _fmt_win(n)}
-            for n in fir_data["notams"]
-            if notam_engine._is_active(n["win_start"], n["win_end"], ref_dt)
-        ]
-        active_fir.sort(key=lambda x: x["tier"])
-        fir_out.append({
-            "fir":      fir_icao,
-            "name":     fir_data["name"],
-            "lat":      round(wp_lat, 4),
-            "lon":      round(wp_lon, 4),
-            "ref_time": ref_dt.strftime("%H%MZ"),
-            "notams":   active_fir,
-        })
+    # ── FIR NOTAMs per leg ────────────────────────────────────────────────────
+    fir_merged = {}
+    for leg_local, (route_json_path, takeoff_utc) in enumerate(
+        zip(leg_routes, leg_takeoffs), start=1
+    ):
+        notam_engine.TAKEOFF_UTC = takeoff_utc
+        with open(route_json_path) as f:
+            route_pts = json.load(f)
 
+        for fir_icao, fir_data in fir_db.items():
+            coords = notam_engine.FIR_COORDS.get(fir_icao)
+            if not coords:
+                if leg_local == 1:
+                    _progress(f"  WARN: no centroid for FIR {fir_icao} ({fir_data['name']}) — skipped")
+                continue
+            ref_dt, _, wp_lat, wp_lon = notam_engine._nearest_waypoint(
+                coords[0], coords[1], route_pts
+            )
+            active_fir = [
+                {"id": n["id"], "tier": n["tier"], "body": n["body"], "window": _fmt_win(n)}
+                for n in fir_data["notams"]
+                if notam_engine._is_active(n["win_start"], n["win_end"], ref_dt)
+            ]
+            active_fir.sort(key=lambda x: x["tier"])
+            leg_fir = {"leg": leg_local, "ref_time": ref_dt.strftime("%H%MZ"), "notams": active_fir}
+            if fir_icao not in fir_merged:
+                fir_merged[fir_icao] = {
+                    "fir":  fir_icao, "name": fir_data["name"],
+                    "lat":  round(wp_lat, 4), "lon": round(wp_lon, 4),
+                    "legs": [leg_fir],
+                }
+            else:
+                fir_merged[fir_icao]["legs"].append(leg_fir)
+
+    fir_out = [e for e in fir_merged.values() if any(l["notams"] for l in e["legs"])]
+
+    fir_to_sum = {}
+    for entry in fir_out:
+        for leg in entry["legs"]:
+            for n in leg["notams"]:
+                fir_to_sum.setdefault(entry["fir"], {})[n["id"]] = n
     fir_summaries = notam_engine._summarize_notams(
-        {e["fir"]: e["notams"] for e in fir_out if e["notams"]}
+        {fir: list(nm.values()) for fir, nm in fir_to_sum.items()}
     )
     for entry in fir_out:
-        for n in entry["notams"]:
-            n["summary"] = fir_summaries.get(
-                (entry["fir"], n["id"]), n["body"].split("\n")[0]
-            )
+        for leg in entry["legs"]:
+            for n in leg["notams"]:
+                n["summary"] = fir_summaries.get(
+                    (entry["fir"], n["id"]), n["body"].split("\n")[0]
+                )
 
-    with open(fir_json, "w") as f:
+    with open(os.path.join(group_dir, "fir_notams.json"), "w") as f:
         json.dump(fir_out, f, indent=2)
 
 
@@ -241,51 +283,79 @@ def _progress(msg):
     print(f"[pipeline] {msg}", flush=True)
 
 
-def _run_pipeline(run_id, ofp_path, met_path, notam_path):
-    run_dir = os.path.join(RUNS_DIR, run_id)
-    os.makedirs(run_dir, exist_ok=True)
+def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
+    """Multi-leg pipeline. ofp_paths is an ordered list of 1–4 OFP file paths."""
+    leg_count = len(ofp_paths)
+    # 1–2 OFPs: single map (all legs in group 1)
+    # 3–4 OFPs: two maps (legs 1-2 in group 1, rest in group 2)
+    half       = (leg_count + 1) // 2 if leg_count > 2 else leg_count
+    group_legs = {1: ofp_paths[:half]}
+    if leg_count > 2:
+        group_legs[2] = ofp_paths[half:]
 
     try:
-        # Step 1 — Extract flight-specific constants
-        _progress("Reading OFP for flight constants…")
-        etd_utc, taxi_min, flight_time_min = _extract_ofp_constants(ofp_path)
-        takeoff_utc = etd_utc + timedelta(minutes=taxi_min)
-        _progress(
-            f"Date {takeoff_utc.strftime('%d %b %Y')}  "
-            f"ETD {etd_utc.strftime('%H%MZ')}  "
-            f"TAXI {taxi_min}min  "
-            f"TAKEOFF {takeoff_utc.strftime('%H%MZ')}  "
-            f"FLT {flight_time_min}min"
-        )
+        for g_num, group_ofps in group_legs.items():
+            group_dir = os.path.join(RUNS_DIR, run_id, str(g_num))
+            os.makedirs(group_dir, exist_ok=True)
 
-        flight_info = _extract_flight_info(ofp_path, etd_utc, flight_time_min)
-        _progress(f"Flight: {flight_info['flight']} {flight_info['dep']}→{flight_info['dest']}  {flight_info['acft']}  {flight_info['reg']}")
-        with open(os.path.join(run_dir, "flight_info.json"), "w") as f:
-            json.dump(flight_info, f, indent=2)
+            # ── Step 1: OFP constants + flight info per leg ──────────────────
+            leg_data = []
+            for local_idx, ofp_path in enumerate(group_ofps, start=1):
+                _progress(f"[G{g_num}/L{local_idx}] Reading OFP…")
+                etd_utc, taxi_min, flt_min = _extract_ofp_constants(ofp_path)
+                takeoff_utc = etd_utc + timedelta(minutes=taxi_min)
+                fi = _extract_flight_info(ofp_path, etd_utc, flt_min)
+                _progress(
+                    f"  {fi['flight']} {fi['dep']}→{fi['dest']}  "
+                    f"ETD {fi['etd']}  TAKEOFF {takeoff_utc.strftime('%H%MZ')}"
+                )
+                leg_data.append({
+                    "local_idx":   local_idx,
+                    "ofp_path":    ofp_path,
+                    "takeoff_utc": takeoff_utc,
+                    "flt_min":     flt_min,
+                    "flight_info": fi,
+                })
 
-        # Step 2 — Parse route waypoints
-        _progress("Parsing route waypoints from OFP…")
-        import parse_ofp
-        parse_ofp.OFP_PDF         = ofp_path
-        parse_ofp.OUT_JSON        = os.path.join(run_dir, "route.json")
-        parse_ofp.FLIGHT_TIME_MIN = flight_time_min
-        parse_ofp.main()
-        _progress("Route parsed.")
+            # ── Step 2: Parse routes ──────────────────────────────────────────
+            import parse_ofp
+            for ld in leg_data:
+                _progress(f"[G{g_num}/L{ld['local_idx']}] Parsing route…")
+                parse_ofp.OFP_PDF         = ld["ofp_path"]
+                parse_ofp.OUT_JSON        = os.path.join(group_dir, f"route_{ld['local_idx']}.json")
+                parse_ofp.FLIGHT_TIME_MIN = ld["flt_min"]
+                parse_ofp.main()
 
-        # Step 3 — MET engine
-        _progress("Processing MET / TAF data…")
-        import met_engine
-        met_engine.MET_PDF     = met_path
-        met_engine.ROUTE_JSON  = os.path.join(run_dir, "route.json")
-        met_engine.OUT_JSON    = os.path.join(run_dir, "airports.json")
-        met_engine.TAKEOFF_UTC = takeoff_utc
-        met_engine.main()
-        _progress("MET data processed.")
+            # ── Step 3: MET engine per leg ────────────────────────────────────
+            import met_engine
+            leg_airports_list = []
+            for ld in leg_data:
+                _progress(f"[G{g_num}/L{ld['local_idx']}] Processing MET…")
+                tmp = os.path.join(group_dir, f"_airports_leg_{ld['local_idx']}.json")
+                met_engine.MET_PDF     = met_path
+                met_engine.ROUTE_JSON  = os.path.join(group_dir, f"route_{ld['local_idx']}.json")
+                met_engine.OUT_JSON    = tmp
+                met_engine.TAKEOFF_UTC = ld["takeoff_utc"]
+                met_engine.main()
+                with open(tmp) as f:
+                    leg_airports_list.append(json.load(f))
+                os.remove(tmp)
 
-        # Step 4 — NOTAM engine (via custom orchestrator)
-        _progress("Processing NOTAMs — AI summaries take ~2 minutes…")
-        _run_notam_step(notam_path, run_dir, takeoff_utc)
-        _progress("NOTAMs processed.")
+            # ── Step 4: Merge airports into multi-leg schema ──────────────────
+            airports = _merge_airports_legs(leg_airports_list)
+
+            # ── Step 5: NOTAM step ────────────────────────────────────────────
+            _progress(f"[G{g_num}] Processing NOTAMs — AI summaries take ~2 minutes…")
+            leg_routes   = [os.path.join(group_dir, f"route_{ld['local_idx']}.json") for ld in leg_data]
+            leg_takeoffs = [ld["takeoff_utc"] for ld in leg_data]
+            _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeoffs)
+
+            # ── Step 6: flight_info.json ──────────────────────────────────────
+            fi_out = {"legs": [ld["flight_info"] for ld in leg_data]}
+            with open(os.path.join(group_dir, "flight_info.json"), "w") as f:
+                json.dump(fi_out, f, indent=2)
+
+            _progress(f"[G{g_num}] Complete.")
 
         with _lock:
             _current_run["status"] = "done"
@@ -300,7 +370,7 @@ def _run_pipeline(run_id, ofp_path, met_path, notam_path):
             _current_run["error"]  = str(exc)
         traceback.print_exc()
     finally:
-        shutil.rmtree(os.path.dirname(ofp_path), ignore_errors=True)
+        shutil.rmtree(os.path.dirname(ofp_paths[0]), ignore_errors=True)
 
 
 # ── Flask routes ──────────────────────────────────────────────────────────────
@@ -331,7 +401,19 @@ def upload_files():
         except OSError:
             pass
 
-    for field in ("ofp", "met", "notam"):
+    # Collect OFP files (ofp_1 required; ofp_2..4 optional)
+    ofp_file_objs = []
+    for i in range(1, 5):
+        f = request.files.get(f"ofp_{i}")
+        if f and f.filename:
+            ext = os.path.splitext(secure_filename(f.filename))[1].lower()
+            if ext != ".pdf":
+                return f"ofp_{i}: only PDF files are accepted", 400
+            ofp_file_objs.append(f)
+        elif i == 1:
+            return "Missing file for field 'ofp_1'", 400
+
+    for field in ("met", "notam"):
         f = request.files.get(field)
         if not f or not f.filename:
             return f"Missing file for field '{field}'", 400
@@ -339,29 +421,37 @@ def upload_files():
         if ext != ".pdf":
             return f"Field '{field}': only PDF files are accepted", 400
 
+    leg_count   = len(ofp_file_objs)
+    group_count = 1 if leg_count <= 2 else 2
+
     run_id     = str(uuid.uuid4())
     upload_dir = os.path.join(UPLOAD_DIR, run_id)
     os.makedirs(upload_dir, exist_ok=True)
 
-    ofp_path   = os.path.join(upload_dir, "ofp.pdf")
+    ofp_paths = []
+    for i, f in enumerate(ofp_file_objs, start=1):
+        path = os.path.join(upload_dir, f"ofp_{i}.pdf")
+        f.save(path)
+        ofp_paths.append(path)
+
     met_path   = os.path.join(upload_dir, "met.pdf")
     notam_path = os.path.join(upload_dir, "notam.pdf")
-
-    request.files["ofp"].save(ofp_path)
     request.files["met"].save(met_path)
     request.files["notam"].save(notam_path)
 
     with _lock:
         _current_run.update({
-            "run_id":   run_id,
-            "status":   "running",
-            "messages": [],
-            "error":    None,
+            "run_id":      run_id,
+            "status":      "running",
+            "messages":    [],
+            "error":       None,
+            "leg_count":   leg_count,
+            "group_count": group_count,
         })
 
     t = threading.Thread(
         target=_run_pipeline,
-        args=(run_id, ofp_path, met_path, notam_path),
+        args=(run_id, ofp_paths, met_path, notam_path),
         daemon=True,
     )
     t.start()
@@ -371,7 +461,9 @@ def upload_files():
 
 @app.route("/progress/<run_id>")
 def progress_page(run_id):
-    return render_template_string(_PROGRESS_HTML, run_id=run_id)
+    with _lock:
+        group_count = _current_run.get("group_count", 1)
+    return render_template_string(_PROGRESS_HTML, run_id=run_id, group_count=group_count)
 
 
 @app.route("/api/status/<run_id>")
@@ -386,16 +478,21 @@ def map_page():
     return send_file(os.path.join(HERE, "index.html"))
 
 
-@app.route("/data/<filename>")
-def serve_data(filename):
+@app.route("/data/<int:group>/<filename>")
+def serve_group_data(group, filename):
     with _lock:
         run_id = _current_run.get("run_id")
         status = _current_run.get("status")
     if run_id and status == "done":
-        path = os.path.join(RUNS_DIR, run_id, filename)
+        path = os.path.join(RUNS_DIR, run_id, str(group), filename)
         if os.path.exists(path):
             return send_file(path)
-    # Fallback to static data/ folder (MVP pre-run output)
+    return Response("Not found", status=404)
+
+
+@app.route("/data/<filename>")
+def serve_data(filename):
+    # Legacy endpoint: serves the static data/ folder (MVP demo fallback only)
     fallback = os.path.join(HERE, "data", filename)
     if os.path.exists(fallback):
         return send_file(fallback)
@@ -426,7 +523,8 @@ _PROGRESS_HTML = """<!doctype html>
   <div id="log"></div>
   <p id="note">NOTAM AI summaries take approximately 2 minutes. Please wait.</p>
   <script>
-    const runId = {{ run_id | tojson }};
+    const runId     = {{ run_id | tojson }};
+    const groupCount = {{ group_count | tojson }};
     let seen = 0;
     const log = document.getElementById("log");
 
@@ -450,7 +548,10 @@ _PROGRESS_HTML = """<!doctype html>
           }
           if (data.status === "done") {
             clearInterval(timer);
-            setTimeout(() => { window.location.href = "/map"; }, 1200);
+            setTimeout(() => {
+              if (groupCount > 1) window.open("/map?g=2", "_blank");
+              window.location.href = "/map?g=1";
+            }, 1200);
           } else if (data.status === "error") {
             clearInterval(timer);
             addLine("Pipeline failed — check server logs.", "err");

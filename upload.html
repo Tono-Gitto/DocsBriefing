@@ -47,7 +47,7 @@
       cursor: pointer;
     }
     input[type="file"]:hover { border-color: #58a6ff; }
-    button {
+    button[type="submit"] {
       width: 100%;
       margin-top: 0.5rem;
       padding: 0.75rem;
@@ -59,7 +59,25 @@
       font-weight: 600;
       cursor: pointer;
     }
-    button:hover { background: #2ea043; }
+    button[type="submit"]:hover { background: #2ea043; }
+    .ofp-slot { position: relative; }
+    .btn-remove-leg {
+      position: absolute; right: 0; top: 0;
+      background: none; border: none;
+      color: #6e7681; font-size: 1rem; cursor: pointer;
+      padding: 0 4px; line-height: 1.4rem;
+    }
+    .btn-remove-leg:hover { color: #f85149; }
+    .btn-add-leg {
+      display: block; width: 100%;
+      margin-bottom: 0.5rem; padding: 0.5rem;
+      background: #0d1117; color: #58a6ff;
+      border: 1px dashed #30363d;
+      border-radius: 6px; font-size: 0.85rem;
+      font-weight: 600; cursor: pointer; text-align: center;
+    }
+    .btn-add-leg:hover { border-color: #58a6ff; background: #161b22; }
+    .btn-add-leg:disabled { color: #444; border-color: #222; cursor: default; }
     .note {
       margin-top: 1.25rem;
       font-size: 0.75rem;
@@ -72,13 +90,18 @@
 <body>
   <div class="card">
     <h1>Preflight Briefing Decoder</h1>
-    <p class="subtitle">Thai Airways B777 — select the three dispatch PDFs for any flight</p>
+    <p class="subtitle">Thai Airways B777 — select dispatch PDFs (1–4 legs per duty)</p>
 
     <form method="POST" action="/upload" enctype="multipart/form-data">
-      <div class="field">
-        <label>OFP <span>— Operational Flight Plan</span></label>
-        <input type="file" name="ofp" accept=".pdf" required>
+      <div id="ofp-slots">
+        <div class="field ofp-slot" id="ofp-slot-1">
+          <label>OFP Leg 1 <span>— Operational Flight Plan</span></label>
+          <input type="file" name="ofp_1" accept=".pdf" required>
+        </div>
       </div>
+
+      <button type="button" class="btn-add-leg" id="btn-add-leg" onclick="addLeg()">+ Add leg</button>
+
       <div class="field">
         <label>MET <span>— Dispatch Weather Package</span></label>
         <input type="file" name="met" accept=".pdf" required>
@@ -87,13 +110,54 @@
         <label>NOTAM <span>— Official Pilot Briefing</span></label>
         <input type="file" name="notam" accept=".pdf" required>
       </div>
-      <button type="submit">Process Flight</button>
+      <button type="submit">Process Duty</button>
     </form>
 
     <p class="note">
-      Processing takes ~2 minutes (AI NOTAM summaries).<br>
-      Files are processed locally and not transmitted to third parties.
+      Processing takes ~2 minutes per leg (AI NOTAM summaries).<br>
+      3–4 OFPs open two map tabs (legs 1–2 and legs 3–4).
     </p>
   </div>
+
+  <script>
+    let legCount = 1;
+
+    function addLeg() {
+      if (legCount >= 4) return;
+      legCount++;
+      const slots = document.getElementById("ofp-slots");
+      const div = document.createElement("div");
+      div.className = "field ofp-slot";
+      div.id = `ofp-slot-${legCount}`;
+      div.innerHTML = `
+        <label>OFP Leg ${legCount} <span>— Operational Flight Plan</span>
+          <button type="button" class="btn-remove-leg" onclick="removeLeg(${legCount})" title="Remove">✕</button>
+        </label>
+        <input type="file" name="ofp_${legCount}" accept=".pdf">`;
+      slots.appendChild(div);
+      if (legCount >= 4) document.getElementById("btn-add-leg").disabled = true;
+    }
+
+    function removeLeg(n) {
+      const slot = document.getElementById(`ofp-slot-${n}`);
+      if (slot) slot.remove();
+      // Re-number remaining slots so names stay sequential
+      legCount = 0;
+      document.querySelectorAll(".ofp-slot").forEach(s => {
+        legCount++;
+        s.id = `ofp-slot-${legCount}`;
+        const input = s.querySelector("input");
+        input.name = `ofp_${legCount}`;
+        const label = s.querySelector("label");
+        // Update only the visible text, preserving the remove button
+        const btn = label.querySelector("button");
+        label.childNodes[0].textContent = `OFP Leg ${legCount} `;
+        if (btn) btn.setAttribute("onclick", `removeLeg(${legCount})`);
+        // First slot has no remove button
+        if (legCount === 1 && btn) btn.remove();
+      });
+      document.getElementById("btn-add-leg").disabled = false;
+    }
+  </script>
 </body>
 </html>

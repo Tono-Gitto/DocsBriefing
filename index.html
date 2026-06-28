@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>TG921 Preflight Briefing</title>
+  <title>Preflight Briefing</title>
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -181,6 +181,19 @@
     .pu-icao { font-size: 1.05rem; font-weight: 700; color: #a0c8ff; }
     .pu-name { font-size: 0.82rem; color: #99a; margin-top: 3px; }
 
+    /* ── Multi-leg section divider ── */
+    .leg-divider {
+      padding: 8px 18px 4px;
+      background: #0e1020;
+      border-bottom: 1px solid #1a1d3a;
+    }
+    .leg-divider-label {
+      font-size: 0.7rem; font-weight: 700;
+      letter-spacing: 0.12em; text-transform: uppercase;
+      color: #5b9ef4;
+    }
+    .leg-divider-label.leg2 { color: #f4a15b; }
+
     /* ── Leaflet tooltip (hover label) ── */
     .leaflet-tooltip {
       background: rgba(18,20,44,0.92);
@@ -214,6 +227,12 @@
 <div id="status">Loading…</div>
 
 <script>
+// ── Group URL param (which map tab: ?g=1 or ?g=2) ─────────────────────────
+const GROUP = new URLSearchParams(location.search).get("g") || "1";
+const DATA  = f => `/data/${GROUP}/${f}`;
+
+const ROUTE_COLORS = ["#5b9ef4", "#f4a15b"];  // leg 1 = blue, leg 2 = orange
+
 let _activeRwyFilter = null;
 
 const map = L.map("map", { center: [30, 60], zoom: 3 });
@@ -246,7 +265,8 @@ function esc(s) {
   return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
 
-function buildChips(runway_info, notams) {
+// ── Runway chips (built from union of notams across all legs) ───────────────
+function buildChips(runway_info, allNotams) {
   const rwyRe = /\bRWY\s+(\d{2}[LCR]?(?:\/\d{2}[LCR]?)?)/gi;
   const pairs = (runway_info || '').match(/\d{2}[LCR]?\/\d{2}[LCR]?\s+\d+/g) || [];
   if (!pairs.length) return esc(runway_info);
@@ -260,7 +280,7 @@ function buildChips(runway_info, notams) {
     let bestTier = null;
     const matchedIds = [];
 
-    for (const n of (notams || [])) {
+    for (const n of (allNotams || [])) {
       if (n.tier > 2) continue;
       const text = (n.summary || '') + ' ' + (n.body || '');
       let m; rwyRe.lastIndex = 0;
@@ -281,7 +301,7 @@ function buildChips(runway_info, notams) {
       }
     }
 
-    const tierAttr = bestTier ? `data-tier="${bestTier}"` : '';
+    const tierAttr  = bestTier ? `data-tier="${bestTier}"` : '';
     const clickAttr = matchedIds.length
       ? `onclick='filterNotams(${JSON.stringify(matchedIds)},"${rwy}")'`
       : '';
@@ -289,17 +309,17 @@ function buildChips(runway_info, notams) {
   }).join('');
 }
 
+// ── NOTAM filter (matches by data-notam-id attr so it spans leg sections) ──
 function filterNotams(ids, rwy) {
   if (_activeRwyFilter && _activeRwyFilter.rwy === rwy) {
     clearNotamFilter();
     return;
   }
-
   _activeRwyFilter = { rwy, ids };
-  const idSet = new Set(ids.map(id => 'notam-' + id.replace(/[^a-zA-Z0-9]/g, '_')));
+  const idSet = new Set(ids.map(id => id.replace(/[^a-zA-Z0-9]/g, '_')));
 
   document.querySelectorAll('.notam-row').forEach(row => {
-    row.style.display = idSet.has(row.id) ? '' : 'none';
+    row.style.display = idSet.has(row.dataset.notamId) ? '' : 'none';
   });
 
   const label = document.getElementById('notam-label');
@@ -314,18 +334,15 @@ function filterNotams(ids, rwy) {
   });
 
   const panel = document.getElementById('panel');
-  const first = [...document.querySelectorAll('.notam-row')].find(r => idSet.has(r.id));
+  const first = [...document.querySelectorAll('.notam-row')].find(r => idSet.has(r.dataset.notamId));
   if (first) panel.scrollTop = first.offsetTop - 80;
 }
 
 function clearNotamFilter() {
   _activeRwyFilter = null;
-
   document.querySelectorAll('.notam-row').forEach(row => { row.style.display = ''; });
-
   const label = document.getElementById('notam-label');
   if (label) label.innerHTML = label.dataset.original || 'NOTAMs';
-
   document.querySelectorAll('.rwy-chip').forEach(chip => {
     chip.classList.remove('rwy-chip-active', 'rwy-chip-dimmed');
   });
@@ -339,59 +356,24 @@ function badgeClass(type) {
   return "badge-becmg";
 }
 
-function buildPanel(ap) {
-  const distLabel = ap.dist_nm < 120
-    ? `~${ap.dist_nm} nm from track`
-    : `~${ap.dist_nm} nm (regional)`;
-
-  let html = `
-    <div class="panel-head">
-      <div class="panel-icao">${esc(ap.icao)} / ${esc(ap.iata)}</div>
-      <div class="panel-name" style="line-height:2">${ap.runway_info ? buildChips(ap.runway_info, ap.notams) : esc(ap.name)}</div>
-      <div class="panel-ref">Ref: ${esc(ap.ref_time)} · ${distLabel}</div>
-    </div>`;
-
-  // TAF base conditions
-  html += `<div class="panel-section">
-    <div class="panel-label">Conditions at ${esc(ap.ref_time)}</div>`;
-  if (ap.taf_base) {
-    html += `<div class="panel-value">${esc(ap.taf_base)}</div>`;
-  } else {
-    html += `<div class="no-data">No TAF</div>`;
-  }
-  html += `</div>`;
-
-  // BECMG in progress
-  if (ap.becmg_in_progress) {
-    const b = ap.becmg_in_progress;
-    html += `<div class="panel-section">
-      <div class="panel-label">BECMG in progress</div>
-      <span class="badge badge-becmg">BECMG</span>
-      <span class="badge-window">${esc(b.window)}</span>
-      <div class="panel-value" style="margin-top:5px">${esc(b.text)}</div>
-    </div>`;
-  }
-
-  // Active TEMPOs / PROBs
-  if (ap.active_overlays && ap.active_overlays.length > 0) {
-    ap.active_overlays.forEach(ov => {
-      html += `<div class="panel-section">
-        <span class="badge ${badgeClass(ov.type)}">${esc(ov.type)}</span>
-        <span class="badge-window">${esc(ov.window)}</span>
-        <div class="panel-value" style="margin-top:5px">${esc(ov.text)}</div>
-      </div>`;
-    });
-  }
-
-  // NOTAMs
-  html += buildNotamSection(ap);
-
-  return html;
+// ── notamRow: unique DOM id per (leg, notam); data-notam-id for filter ──────
+function notamRow(n, legNum) {
+  const tierClass = n.tier === 1 ? "badge-t1" : n.tier === 2 ? "badge-t2" : "badge-t3";
+  const tierLabel = n.tier === 1 ? "T1" : n.tier === 2 ? "T2" : "T3";
+  const win    = compactWindow(n.window);
+  const safeId = n.id.replace(/[^a-zA-Z0-9]/g, '_');
+  const domId  = `notam-l${legNum}-${safeId}`;
+  let row = `<div class="notam-row" id="${domId}" data-notam-id="${safeId}">
+    <div class="notam-header">
+      <span class="badge ${tierClass}">${tierLabel}</span>
+      <span class="notam-id">${esc(n.id)}</span>`;
+  if (win) row += `<span class="notam-window">${esc(win)}</span>`;
+  row += `</div><div class="notam-body">${esc(n.summary || n.body)}</div></div>`;
+  return row;
 }
 
 function compactWindow(w) {
   if (!w) return "";
-  // "19 Jun 2026 17:00Z – 20 Jun 2026 23:30Z" → "19Jun 1700–20Jun 2330Z"
   const m = w.match(/(\d+)\s+(\w+)\s+\d+\s+(\d+):(\d+)Z\s+–\s+(\d+)\s+(\w+)\s+\d+\s+(\d+):(\d+)Z/);
   if (!m) return w;
   const [, d1, mo1, h1, mi1, d2, mo2, h2, mi2] = m;
@@ -401,55 +383,119 @@ function compactWindow(w) {
   return `${from}–${to}`;
 }
 
+// ── buildPanel: supports both new `legs` schema and legacy flat schema ───────
+function buildPanel(ap) {
+  // Normalise legacy flat format → legs array
+  const legs = ap.legs || [{
+    leg: 1,
+    ref_time:          ap.ref_time,
+    taf_base:          ap.taf_base,
+    becmg_in_progress: ap.becmg_in_progress,
+    active_overlays:   ap.active_overlays || [],
+    notams:            ap.notams || [],
+    notam_covered:     ap.notam_covered,
+  }];
 
-function notamRow(n) {
-  const tierClass = n.tier === 1 ? "badge-t1" : n.tier === 2 ? "badge-t2" : "badge-t3";
-  const tierLabel = n.tier === 1 ? "T1" : n.tier === 2 ? "T2" : "T3";
-  const win = compactWindow(n.window);
-  const safeId = 'notam-' + n.id.replace(/[^a-zA-Z0-9]/g, '_');
-  let row = `<div class="notam-row" id="${safeId}"><div class="notam-header">
-      <span class="badge ${tierClass}">${tierLabel}</span>
-      <span class="notam-id">${esc(n.id)}</span>`;
-  if (win) row += `<span class="notam-window">${esc(win)}</span>`;
-  row += `</div><div class="notam-body">${esc(n.summary || n.body)}</div></div>`;
-  return row;
-}
+  const allNotams  = legs.flatMap(l => l.notams || []);
+  const multiLeg   = legs.length > 1;
+  const distLabel  = ap.dist_nm != null
+    ? (ap.dist_nm < 120 ? `~${ap.dist_nm} nm from track` : `~${ap.dist_nm} nm (regional)`)
+    : "";
 
-function buildNotamSection(ap) {
-  const notams = ap.notams || [];
-  const covered = ap.notam_covered;
-
-  const labelText = `NOTAMs active at ${esc(ap.ref_time)}`;
-  let html = `<div class="panel-section">
-    <div class="panel-label" id="notam-label" data-original="${labelText}">${labelText}</div>`;
-
-  if (notams.length === 0) {
-    if (covered) {
-      html += `<div class="no-data">No active NOTAMs at ref time</div>`;
-    } else {
-      html += `<div class="no-data">Airport not in NOTAM brief</div>`;
-    }
-    return html + `</div>`;
-  }
-
-  notams.forEach(n => { html += notamRow(n); });
-  return html + `</div>`;
-}
-
-function buildFirPanel(f) {
   let html = `<div class="panel-head">
-    <div class="panel-icao">${esc(f.fir)}</div>
-    <div class="panel-name">${esc(f.name)}</div>
-    <div class="panel-ref">Ref: ${esc(f.ref_time)}</div>
+    <div class="panel-icao">${esc(ap.icao)} / ${esc(ap.iata)}</div>
+    <div class="panel-name" style="line-height:2">${ap.runway_info ? buildChips(ap.runway_info, allNotams) : esc(ap.name)}</div>
+    ${distLabel ? `<div class="panel-ref">${distLabel}</div>` : ""}
   </div>`;
-  html += buildFirNotamSection(f);
+
+  legs.forEach((leg, i) => {
+    if (multiLeg) {
+      const cls = leg.leg === 2 ? "leg-divider-label leg2" : "leg-divider-label";
+      html += `<div class="leg-divider">
+        <span class="${cls}">LEG ${leg.leg} · ${esc(leg.ref_time)}</span>
+      </div>`;
+    }
+
+    // TAF base conditions
+    const isFirst = i === 0;
+    const notamLabelId   = isFirst ? 'id="notam-label"' : '';
+    const notamLabelOrig = `NOTAMs active at ${esc(leg.ref_time)}`;
+
+    html += `<div class="panel-section">
+      <div class="panel-label">Conditions at ${esc(leg.ref_time)}</div>`;
+    html += leg.taf_base
+      ? `<div class="panel-value">${esc(leg.taf_base)}</div>`
+      : `<div class="no-data">No TAF</div>`;
+    html += `</div>`;
+
+    // BECMG in progress
+    if (leg.becmg_in_progress) {
+      const b = leg.becmg_in_progress;
+      html += `<div class="panel-section">
+        <div class="panel-label">BECMG in progress</div>
+        <span class="badge badge-becmg">BECMG</span>
+        <span class="badge-window">${esc(b.window)}</span>
+        <div class="panel-value" style="margin-top:5px">${esc(b.text)}</div>
+      </div>`;
+    }
+
+    // Active TEMPOs / PROBs
+    (leg.active_overlays || []).forEach(ov => {
+      html += `<div class="panel-section">
+        <span class="badge ${badgeClass(ov.type)}">${esc(ov.type)}</span>
+        <span class="badge-window">${esc(ov.window)}</span>
+        <div class="panel-value" style="margin-top:5px">${esc(ov.text)}</div>
+      </div>`;
+    });
+
+    // NOTAMs for this leg
+    const notams  = leg.notams || [];
+    const covered = leg.notam_covered;
+    html += `<div class="panel-section">
+      <div class="panel-label" ${notamLabelId} data-original="${notamLabelOrig}">${notamLabelOrig}</div>`;
+    if (notams.length === 0) {
+      html += covered
+        ? `<div class="no-data">No active NOTAMs at ref time</div>`
+        : `<div class="no-data">Airport not in NOTAM brief</div>`;
+    } else {
+      notams.forEach(n => { html += notamRow(n, leg.leg); });
+    }
+    html += `</div>`;
+  });
+
   return html;
 }
 
-function buildFirNotamSection(f) {
-  const notams = f.notams || [];
+// ── buildFirPanel: supports both new `legs` schema and legacy flat schema ────
+function buildFirPanel(f) {
+  const legs = f.legs || [{
+    leg: 1, ref_time: f.ref_time, notams: f.notams || [],
+  }];
+  const multiLeg = legs.length > 1;
+
+  let html = `<div class="panel-head">
+    <div class="panel-icao">${esc(f.fir)}</div>
+    <div class="panel-name">${esc(f.name)}</div>
+    ${!multiLeg ? `<div class="panel-ref">Ref: ${esc(legs[0].ref_time)}</div>` : ""}
+  </div>`;
+
+  legs.forEach(leg => {
+    if (multiLeg) {
+      const cls = leg.leg === 2 ? "leg-divider-label leg2" : "leg-divider-label";
+      html += `<div class="leg-divider">
+        <span class="${cls}">LEG ${leg.leg} · ${esc(leg.ref_time)}</span>
+      </div>`;
+    }
+    html += buildFirNotamSection(leg);
+  });
+
+  return html;
+}
+
+function buildFirNotamSection(leg) {
+  const notams = leg.notams || [];
   let html = `<div class="panel-section">
-    <div class="panel-label">FIR NOTAMs active at ${esc(f.ref_time)}</div>`;
+    <div class="panel-label">FIR NOTAMs active at ${esc(leg.ref_time)}</div>`;
 
   if (notams.length === 0) {
     return html + `<div class="no-data">No active FIR NOTAMs</div></div>`;
@@ -458,15 +504,15 @@ function buildFirNotamSection(f) {
   const t1t2 = notams.filter(n => n.tier < 3);
   const t3   = notams.filter(n => n.tier === 3);
 
-  t1t2.forEach(n => { html += notamRow(n); });
+  t1t2.forEach(n => { html += notamRow(n, leg.leg); });
 
   if (t3.length <= 5) {
-    t3.forEach(n => { html += notamRow(n); });
+    t3.forEach(n => { html += notamRow(n, leg.leg); });
   } else {
-    t3.slice(0, 5).forEach(n => { html += notamRow(n); });
-    const uid = `t3-${f.fir}`;
+    t3.slice(0, 5).forEach(n => { html += notamRow(n, leg.leg); });
+    const uid = `t3-fir-l${leg.leg}`;
     html += `<div id="${uid}-more" style="display:none">`;
-    t3.slice(5).forEach(n => { html += notamRow(n); });
+    t3.slice(5).forEach(n => { html += notamRow(n, leg.leg); });
     html += `</div>
       <div class="t3-expand" onclick="expandT3('${uid}', this)">
         show ${t3.length - 5} more T3 ▾
@@ -480,8 +526,7 @@ function buildFirNotamSection(f) {
 function circleIcon(color, size) {
   return L.divIcon({
     className: "",
-    html: `<div style="
-      width:${size}px;height:${size}px;border-radius:50%;
+    html: `<div style="width:${size}px;height:${size}px;border-radius:50%;
       background:${color};border:2px solid rgba(255,255,255,0.5);
       box-shadow:0 0 8px ${color}88;cursor:pointer;"></div>`,
     iconSize:   [size, size],
@@ -490,7 +535,6 @@ function circleIcon(color, size) {
 }
 
 function firIcon(color) {
-  // 36×36 transparent hit area wraps a 16×16 visible diamond — easier to tap on touch
   return L.divIcon({
     className: "",
     html: `<div style="width:36px;height:36px;display:flex;align-items:center;justify-content:center;cursor:pointer;">
@@ -502,55 +546,105 @@ function firIcon(color) {
   });
 }
 
-const ICON_DEP  = circleIcon("#4cff91", 26);
-const ICON_DEST = circleIcon("#ff6b6b", 26);
-const ICON_MET  = circleIcon("#a0c8ff", 20);
+// ── Marker color: dep=green, dest=red, turnaround=amber, met=light-blue ───
+let depSet  = new Set();
+let destSet = new Set();
 
-// ── Route polyline ─────────────────────────────────────────────────────────
-fetch("data/route.json")
-  .then(r => r.json())
-  .then(wps => {
-    const lls = wps.map(w => [w.lat, w.lon]);
-    L.polyline(lls, { color: "#5b9ef4", weight: 2.5, opacity: 0.85 }).addTo(map);
-    map.fitBounds(L.latLngBounds(lls), { padding: [40, 40] });
-    document.getElementById("status").textContent = `Route: ${wps.length} waypoints`;
-  })
-  .catch(e => {
-    document.getElementById("status").textContent = "Route load failed: " + e.message;
+function markerColor(icao) {
+  const isDep  = depSet.has(icao);
+  const isDest = destSet.has(icao);
+  if (isDep && isDest) return "#ffc107";  // amber = turnaround
+  if (isDep)           return "#4cff91";  // green = departure
+  if (isDest)          return "#ff6b6b";  // red = destination
+  return "#a0c8ff";                       // light blue = enroute MET
+}
+function markerSize(icao) {
+  return (depSet.has(icao) || destSet.has(icao)) ? 26 : 20;
+}
+function markerZIndex(icao) {
+  return (depSet.has(icao) || destSet.has(icao)) ? 100 : 0;
+}
+
+// ── Main data loading ──────────────────────────────────────────────────────
+Promise.all([
+  fetch(DATA("flight_info.json")).then(r => r.json()).catch(() => ({})),
+  fetch(DATA("airports.json")).then(r => r.json()),
+]).then(([fi, airports]) => {
+  // Support legacy flat format (dep/dest as direct strings)
+  const legs = fi.legs || (fi.dep ? [{leg:1, dep:fi.dep, dest:fi.dest,
+    flight:fi.flight, date:fi.date, acft:fi.acft, reg:fi.reg}] : []);
+
+  legs.forEach(l => {
+    if (l.dep)  depSet.add(l.dep);
+    if (l.dest) destSet.add(l.dest);
   });
 
-// ── Flight info + MET airports (loaded together so dep/dest colors are always correct) ──
-Promise.all([
-  fetch("data/flight_info.json").then(r => r.json()).catch(() => ({ dep: "", dest: "" })),
-  fetch("data/airports.json").then(r => r.json()),
-]).then(([fi, airports]) => {
-  document.getElementById("hdr-title").textContent =
-    fi.flight ? `${fi.flight} — ${fi.dep} → ${fi.dest}` : "Preflight Briefing";
-  document.getElementById("hdr-sub").textContent =
-    fi.date ? `${fi.date} · ${fi.acft} · ${fi.reg}` : "";
-  if (fi.flight) document.title = `${fi.flight} Preflight Briefing`;
+  // Header: show all legs
+  if (legs.length > 0) {
+    const title = legs.map(l => `${l.flight} ${l.dep}→${l.dest}`).join("  ·  ");
+    document.getElementById("hdr-title").textContent = title;
+    const l0 = legs[0];
+    document.getElementById("hdr-sub").textContent =
+      l0.date ? `${l0.date} · ${l0.acft} · ${l0.reg}` : "";
+    document.title = legs.map(l => l.flight).join(" / ") + " Preflight Briefing";
+  }
 
+  // Fetch route polylines for each leg in this group
+  const routePromises = [];
+  for (let i = 1; i <= Math.max(legs.length, 1); i++) {
+    routePromises.push(
+      fetch(DATA(`route_${i}.json`)).then(r => r.json()).then(wps => ({ i, wps })).catch(() => null)
+    );
+  }
+  Promise.all(routePromises).then(results => {
+    let totalWpts = 0;
+    let firstBounds = null;
+    results.filter(Boolean).forEach(({ i, wps }) => {
+      const lls = wps.map(w => [w.lat, w.lon]);
+      const color = ROUTE_COLORS[i - 1] || ROUTE_COLORS[0];
+      L.polyline(lls, { color, weight: 2.5, opacity: 0.85 }).addTo(map);
+      totalWpts += wps.length;
+      if (i === 1 && lls.length) firstBounds = L.latLngBounds(lls);
+    });
+    if (firstBounds) map.fitBounds(firstBounds, { padding: [40, 40] });
+    document.getElementById("status").textContent =
+      results.filter(Boolean).length > 1
+        ? `${results.filter(Boolean).length} legs · ${totalWpts} waypoints`
+        : `Route: ${totalWpts} waypoints`;
+  });
+
+  // Airport markers
   airports.forEach(ap => {
-    const isDep  = ap.icao === fi.dep;
-    const isDest = ap.icao === fi.dest;
-    const icon   = isDep ? ICON_DEP : isDest ? ICON_DEST : ICON_MET;
-    const offset = (isDep || isDest) ? [0, -12] : [0, -9];
-
-    L.marker([ap.lat, ap.lon], { icon, zIndexOffset: (isDep || isDest) ? 100 : 0 })
+    const color  = markerColor(ap.icao);
+    const size   = markerSize(ap.icao);
+    const zIndex = markerZIndex(ap.icao);
+    const icon   = circleIcon(color, size);
+    const offset = size > 20 ? [0, -12] : [0, -9];
+    L.marker([ap.lat, ap.lon], { icon, zIndexOffset: zIndex })
       .bindTooltip(ap.icao, { direction: "top", offset })
       .on("click", () => openPanel(ap))
       .addTo(map);
   });
-}).catch(e => console.error("Airports load failed:", e));
 
-// ── FIR markers ───────────────────────────────────────────────────────────────
-fetch("data/fir_notams.json")
+}).catch(e => {
+  console.error("Data load failed:", e);
+  document.getElementById("status").textContent = "Load failed: " + e.message;
+});
+
+// ── FIR markers ───────────────────────────────────────────────────────────
+fetch(DATA("fir_notams.json"))
   .then(r => r.json())
   .then(firs => {
-    firs.filter(f => f.notams.length > 0).forEach(f => {
-      const color = f.notams.some(n => n.tier === 1) ? "#ff8080" : "#1a1a2e";
+    firs.forEach(f => {
+      // Support both new `legs` schema and legacy flat schema
+      const legs = f.legs || [{leg:1, ref_time:f.ref_time, notams:f.notams||[]}];
+      const allFirNotams = legs.flatMap(l => l.notams || []);
+      if (!allFirNotams.length) return;
+
+      const color = allFirNotams.some(n => n.tier === 1) ? "#ff8080" : "#1a1a2e";
+      const tip   = `${f.fir} — ${f.name} (${allFirNotams.length})`;
       L.marker([f.lat, f.lon], { icon: firIcon(color), zIndexOffset: 50 })
-        .bindTooltip(`${f.fir} — ${f.name} (${f.notams.length})`, { direction: "top", offset: [0, -8] })
+        .bindTooltip(tip, { direction: "top", offset: [0, -8] })
         .on("click", () => openPanel(f, "fir"))
         .addTo(map);
     });
