@@ -125,11 +125,12 @@ Pipeline runs in a background thread; progress streamed via `GET /api/status/<id
 - URL param `?g=1` or `?g=2` selects the group; all data fetches go to `/data/<GROUP>/<file>`.
 - **Leg route colors:** leg 1 = blue (`#5b9ef4`), leg 2 = orange (`#f4a15b`).
 - **Marker colors:** green = departure, red = destination, amber = turnaround (dep and dest same airport), light blue = enroute MET.
-- **Multi-leg panel:** when an airport appears in multiple legs, the side panel shows a `LEG N · HHMMZ` divider between leg sections.
-- **FIR diamond color:** red (`#ff8080`) when the FIR has at least one T1 NOTAM; near-black (`#1a1a2e`) otherwise. Logic: `f.legs.flatMap(l => l.notams).some(n => n.tier === 1)`. T2 navaid outages appear as T2 badges only.
-- **T3 NOTAM collapse:** FIR panel shows first 5 T3 NOTAMs then a "show N more" toggle.
-- **Runway chips** (`buildChips(runway_info, allNotams)`): glow red/orange when a T1/T2 NOTAM references that runway. Matching is suffix-aware — `04L` matches only chips with that exact end; bare `RWY 04` matches any chip sharing that numeric designator.
-- **Runway filter** (`filterNotams(ids, rwy)` / `clearNotamFilter()`): tapping a highlighted chip filters NOTAMs across all leg sections. State kept in `_activeRwyFilter`.
+- **Multi-leg panel layout** (`buildPanel`): MET for all legs appears first — each leg gets a `LEG N · HHMMZ` sub-header (blue for leg 1, orange for leg 2), then its conditions/BECMG/overlays. After all MET, a single unified NOTAM block follows, labeled `NOTAMs · L1 HHMMZ · L2 HHMMZ`. NOTAMs active in both legs appear once with no mark; NOTAMs exclusive to one leg get an `L1` or `L2` chip in the leg color. If a leg has no active NOTAMs, a note `Lx — No active NOTAMs at HHMMZ` is appended at the bottom. Same unified logic applies to FIR panels (`buildFirPanel`).
+- **NOTAM deduplication** (`notamRowUnified`): dedup is by NOTAM ID. Since `_run_notam_step_multi()` already deduplicates AI summarisation across legs, the same ID has identical `summary`/`body` regardless of which leg surfaces it.
+- **FIR diamond color:** red (`#ff8080`) when the FIR has at least one T1 NOTAM across any leg; near-black (`#1a1a2e`) otherwise. Logic: `f.legs.flatMap(l => l.notams).some(n => n.tier === 1)`. T2 navaid outages appear as T2 badges only.
+- **T3 NOTAM collapse:** FIR panel (single and multi-leg) collapses T3 NOTAMs beyond 5 behind a "show N more" toggle.
+- **Runway chips** (`buildChips(runway_info, allNotams)`): built from the union of NOTAMs across all legs. Glow red/orange when a T1/T2 NOTAM references that runway. Matching is suffix-aware — `04L` matches only chips with that exact end; bare `RWY 04` matches any chip sharing that numeric designator.
+- **Runway filter** (`filterNotams(ids, rwy)` / `clearNotamFilter()`): tapping a highlighted chip filters `.notam-row` elements by `data-notam-id`. Works on the unified NOTAM block since each ID appears at most once. State kept in `_activeRwyFilter`.
 - Both `legs`-schema and legacy flat schema are handled in `buildPanel()` / `buildFirPanel()`.
 
 **`upload.html`** is the Flask-served upload page (`GET /`). Supports dynamically adding/removing legs 2–4 via JS.
@@ -242,8 +243,10 @@ Hosted on Railway at **https://web-production-2ec19.up.railway.app** (project: D
 
 ---
 
-## Test Fixture
+## Test Fixtures
 
 **TG921, 20 JUN 2026, EDDF→VTBS** (B773E, HSTKZ) — `Input/TG921_OFP.pdf`, `Input/TG921_MET.pdf`, `Input/TG921_NOTAM.pdf`. These files are never modified. All validated results in the MET table above reproduce exactly against them. If a parser change shifts any of those results without a clear reason, that is a regression.
 
 The CLI scripts (`parse_ofp.py`, `met_engine.py`, `notam_engine.py`) are hardcoded to this fixture — they are the regression test harness. The Flask app's monkey-patching approach is what enables multi-flight use.
+
+**TG415/TG416, 28 JUN 2026, VTBS↔WMKK** (quick turnaround) — `Input/TG415_OFP.pdf`, `Input/TG416_OFP.pdf`, `Input/TG415_MET.pdf`, `Input/TG415_NOTAM.pdf`. Both legs share the same MET and NOTAM PDFs. Use this fixture to test multi-leg behavior (2 OFPs uploaded together). TG415 takeoff 0230Z, TG416 takeoff 0540Z. VTBB and WMFC FIRs appear in the NOTAM PDF.
