@@ -153,6 +153,17 @@
       letter-spacing: 0; margin-left: 6px; font-size: 0.68rem;
     }
 
+    /* L1/L2 leg chips in unified NOTAM block */
+    .leg-chip {
+      display: inline-block;
+      font-size: 0.6rem; font-weight: 700;
+      letter-spacing: 0.05em; padding: 2px 5px;
+      border-radius: 3px; margin-left: 3px;
+      text-transform: uppercase; vertical-align: middle;
+    }
+    .leg-chip:not(.leg2) { background: #0e1e38; color: #5b9ef4; border: 1px solid #2a4a7a; }
+    .leg-chip.leg2       { background: #2e1e08; color: #f4a15b; border: 1px solid #7a4a18; }
+
     /* 44px min-height touch target for "show N more" */
     .t3-expand {
       font-size: 0.78rem; color: #556; cursor: pointer; touch-action: manipulation;
@@ -372,6 +383,24 @@ function notamRow(n, legNum) {
   return row;
 }
 
+// ── notamRowUnified: single NOTAM row for the unified multi-leg NOTAM block ──
+function notamRowUnified(n, legNums) {
+  const tierClass = n.tier === 1 ? "badge-t1" : n.tier === 2 ? "badge-t2" : "badge-t3";
+  const tierLabel = n.tier === 1 ? "T1" : n.tier === 2 ? "T2" : "T3";
+  const win    = compactWindow(n.window);
+  const safeId = n.id.replace(/[^a-zA-Z0-9]/g, '_');
+  const chips  = legNums
+    ? legNums.map(num => `<span class="leg-chip${num === 2 ? ' leg2' : ''}">L${num}</span>`).join('')
+    : '';
+  let row = `<div class="notam-row" id="notam-u-${safeId}" data-notam-id="${safeId}">
+    <div class="notam-header">
+      <span class="badge ${tierClass}">${tierLabel}</span>${chips}
+      <span class="notam-id">${esc(n.id)}</span>`;
+  if (win) row += `<span class="notam-window">${esc(win)}</span>`;
+  row += `</div><div class="notam-body">${esc(n.summary || n.body)}</div></div>`;
+  return row;
+}
+
 function compactWindow(w) {
   if (!w) return "";
   const m = w.match(/(\d+)\s+(\w+)\s+\d+\s+(\d+):(\d+)Z\s+–\s+(\d+)\s+(\w+)\s+\d+\s+(\d+):(\d+)Z/);
@@ -383,9 +412,8 @@ function compactWindow(w) {
   return `${from}–${to}`;
 }
 
-// ── buildPanel: supports both new `legs` schema and legacy flat schema ───────
+// ── buildPanel: MET for all legs first, then unified NOTAM block ─────────────
 function buildPanel(ap) {
-  // Normalise legacy flat format → legs array
   const legs = ap.legs || [{
     leg: 1,
     ref_time:          ap.ref_time,
@@ -396,9 +424,9 @@ function buildPanel(ap) {
     notam_covered:     ap.notam_covered,
   }];
 
-  const allNotams  = legs.flatMap(l => l.notams || []);
-  const multiLeg   = legs.length > 1;
-  const distLabel  = ap.dist_nm != null
+  const allNotams = legs.flatMap(l => l.notams || []);
+  const multiLeg  = legs.length > 1;
+  const distLabel = ap.dist_nm != null
     ? (ap.dist_nm < 120 ? `~${ap.dist_nm} nm from track` : `~${ap.dist_nm} nm (regional)`)
     : "";
 
@@ -408,19 +436,12 @@ function buildPanel(ap) {
     ${distLabel ? `<div class="panel-ref">${distLabel}</div>` : ""}
   </div>`;
 
-  legs.forEach((leg, i) => {
+  // ── MET block: all legs in order ─────────────────────────────────────────
+  legs.forEach(leg => {
     if (multiLeg) {
       const cls = leg.leg === 2 ? "leg-divider-label leg2" : "leg-divider-label";
-      html += `<div class="leg-divider">
-        <span class="${cls}">LEG ${leg.leg} · ${esc(leg.ref_time)}</span>
-      </div>`;
+      html += `<div class="leg-divider"><span class="${cls}">LEG ${leg.leg} · ${esc(leg.ref_time)}</span></div>`;
     }
-
-    // TAF base conditions
-    const isFirst = i === 0;
-    const notamLabelId   = isFirst ? 'id="notam-label"' : '';
-    const notamLabelOrig = `NOTAMs active at ${esc(leg.ref_time)}`;
-
     html += `<div class="panel-section">
       <div class="panel-label">Conditions at ${esc(leg.ref_time)}</div>`;
     html += leg.taf_base
@@ -428,7 +449,6 @@ function buildPanel(ap) {
       : `<div class="no-data">No TAF</div>`;
     html += `</div>`;
 
-    // BECMG in progress
     if (leg.becmg_in_progress) {
       const b = leg.becmg_in_progress;
       html += `<div class="panel-section">
@@ -438,8 +458,6 @@ function buildPanel(ap) {
         <div class="panel-value" style="margin-top:5px">${esc(b.text)}</div>
       </div>`;
     }
-
-    // Active TEMPOs / PROBs
     (leg.active_overlays || []).forEach(ov => {
       html += `<div class="panel-section">
         <span class="badge ${badgeClass(ov.type)}">${esc(ov.type)}</span>
@@ -447,30 +465,62 @@ function buildPanel(ap) {
         <div class="panel-value" style="margin-top:5px">${esc(ov.text)}</div>
       </div>`;
     });
-
-    // NOTAMs for this leg
-    const notams  = leg.notams || [];
-    const covered = leg.notam_covered;
-    html += `<div class="panel-section">
-      <div class="panel-label" ${notamLabelId} data-original="${notamLabelOrig}">${notamLabelOrig}</div>`;
-    if (notams.length === 0) {
-      html += covered
-        ? `<div class="no-data">No active NOTAMs at ref time</div>`
-        : `<div class="no-data">Airport not in NOTAM brief</div>`;
-    } else {
-      notams.forEach(n => { html += notamRow(n, leg.leg); });
-    }
-    html += `</div>`;
   });
 
+  // ── Unified NOTAM block ───────────────────────────────────────────────────
+  const notamLabelText = multiLeg
+    ? `NOTAMs · ${legs.map(l => `L${l.leg} ${l.ref_time}`).join(' · ')}`
+    : `NOTAMs active at ${legs[0].ref_time}`;
+
+  html += `<div class="panel-section">
+    <div class="panel-label" id="notam-label" data-original="${notamLabelText}">${notamLabelText}</div>`;
+
+  const allUncovered = legs.every(l => l.notam_covered === false);
+  if (allUncovered) {
+    html += `<div class="no-data">Airport not in NOTAM brief</div>`;
+  } else if (!multiLeg) {
+    const notams = legs[0].notams || [];
+    if (notams.length === 0) {
+      html += `<div class="no-data">No active NOTAMs at ref time</div>`;
+    } else {
+      notams.forEach(n => { html += notamRow(n, legs[0].leg); });
+    }
+  } else {
+    // Deduplicate by NOTAM ID across legs, sort by tier
+    const notamMap = new Map();
+    legs.forEach(leg => {
+      (leg.notams || []).forEach(n => {
+        if (!notamMap.has(n.id)) notamMap.set(n.id, { notam: n, legNums: [] });
+        notamMap.get(n.id).legNums.push(leg.leg);
+      });
+    });
+    const unified = [...notamMap.values()].sort((a, b) => a.notam.tier - b.notam.tier);
+
+    if (unified.length === 0) {
+      html += `<div class="no-data">No active NOTAMs at either ref time</div>`;
+    } else {
+      unified.forEach(({ notam: n, legNums }) => {
+        html += notamRowUnified(n, legNums.length < legs.length ? legNums : null);
+      });
+    }
+    // Per-leg notes for empty / not-in-brief
+    legs.forEach(leg => {
+      if (leg.notam_covered === false) {
+        html += `<div class="no-data" style="margin-top:6px">
+          <span class="leg-chip${leg.leg === 2 ? ' leg2' : ''}">L${leg.leg}</span> Airport not in NOTAM brief</div>`;
+      } else if ((leg.notams || []).length === 0) {
+        html += `<div class="no-data" style="margin-top:6px">
+          <span class="leg-chip${leg.leg === 2 ? ' leg2' : ''}">L${leg.leg}</span> No active NOTAMs at ${esc(leg.ref_time)}</div>`;
+      }
+    });
+  }
+  html += `</div>`;
   return html;
 }
 
-// ── buildFirPanel: supports both new `legs` schema and legacy flat schema ────
+// ── buildFirPanel: unified NOTAM block for multi-leg; original for single ────
 function buildFirPanel(f) {
-  const legs = f.legs || [{
-    leg: 1, ref_time: f.ref_time, notams: f.notams || [],
-  }];
+  const legs = f.legs || [{ leg: 1, ref_time: f.ref_time, notams: f.notams || [] }];
   const multiLeg = legs.length > 1;
 
   let html = `<div class="panel-head">
@@ -479,16 +529,57 @@ function buildFirPanel(f) {
     ${!multiLeg ? `<div class="panel-ref">Ref: ${esc(legs[0].ref_time)}</div>` : ""}
   </div>`;
 
-  legs.forEach(leg => {
-    if (multiLeg) {
-      const cls = leg.leg === 2 ? "leg-divider-label leg2" : "leg-divider-label";
-      html += `<div class="leg-divider">
-        <span class="${cls}">LEG ${leg.leg} · ${esc(leg.ref_time)}</span>
-      </div>`;
-    }
-    html += buildFirNotamSection(leg);
-  });
+  if (!multiLeg) {
+    return html + buildFirNotamSection(legs[0]);
+  }
 
+  // Multi-leg: deduplicate by NOTAM ID, sort by tier
+  const notamMap = new Map();
+  legs.forEach(leg => {
+    (leg.notams || []).forEach(n => {
+      if (!notamMap.has(n.id)) notamMap.set(n.id, { notam: n, legNums: [] });
+      notamMap.get(n.id).legNums.push(leg.leg);
+    });
+  });
+  const unified = [...notamMap.values()].sort((a, b) => a.notam.tier - b.notam.tier);
+  const notamLabel = `FIR NOTAMs · ${legs.map(l => `L${l.leg} ${l.ref_time}`).join(' · ')}`;
+
+  html += `<div class="panel-section"><div class="panel-label">${notamLabel}</div>`;
+
+  if (unified.length === 0) {
+    html += `<div class="no-data">No active FIR NOTAMs</div>`;
+  } else {
+    const t1t2 = unified.filter(u => u.notam.tier < 3);
+    const t3   = unified.filter(u => u.notam.tier === 3);
+
+    t1t2.forEach(({ notam: n, legNums }) => {
+      html += notamRowUnified(n, legNums.length < legs.length ? legNums : null);
+    });
+
+    if (t3.length <= 5) {
+      t3.forEach(({ notam: n, legNums }) => {
+        html += notamRowUnified(n, legNums.length < legs.length ? legNums : null);
+      });
+    } else {
+      t3.slice(0, 5).forEach(({ notam: n, legNums }) => {
+        html += notamRowUnified(n, legNums.length < legs.length ? legNums : null);
+      });
+      const uid = 't3-fir-unified';
+      html += `<div id="${uid}-more" style="display:none">`;
+      t3.slice(5).forEach(({ notam: n, legNums }) => {
+        html += notamRowUnified(n, legNums.length < legs.length ? legNums : null);
+      });
+      html += `</div><div class="t3-expand" onclick="expandT3('${uid}', this)">show ${t3.length - 5} more T3 ▾</div>`;
+    }
+
+    legs.forEach(leg => {
+      if ((leg.notams || []).length === 0) {
+        html += `<div class="no-data" style="margin-top:6px">
+          <span class="leg-chip${leg.leg === 2 ? ' leg2' : ''}">L${leg.leg}</span> No active FIR NOTAMs at ${esc(leg.ref_time)}</div>`;
+      }
+    });
+  }
+  html += `</div>`;
   return html;
 }
 
