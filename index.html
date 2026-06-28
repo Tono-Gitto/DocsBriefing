@@ -163,6 +163,15 @@
     }
     .leg-chip:not(.leg2) { background: #0e1e38; color: #5b9ef4; border: 1px solid #2a4a7a; }
     .leg-chip.leg2       { background: #2e1e08; color: #f4a15b; border: 1px solid #7a4a18; }
+    .taf-clickable { cursor: pointer; }
+    .taf-clickable:hover { text-decoration: underline dotted #6e7681; }
+    .taf-expand-block {
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 0.72rem; color: #8b949e;
+      background: #0d1117; border: 1px solid #30363d;
+      border-radius: 4px; padding: 6px 8px;
+      margin-top: 5px; word-break: break-all; white-space: pre-wrap;
+    }
 
     /* 44px min-height touch target for "show N more" */
     .t3-expand {
@@ -359,6 +368,21 @@ function clearNotamFilter() {
   });
 }
 
+const _tafRaw = {};
+function toggleTaf(el, icao) {
+  const next = el.nextElementSibling;
+  if (next && next.classList.contains('taf-expand-block')) {
+    next.remove();
+    return;
+  }
+  const raw = _tafRaw[icao] || '';
+  if (!raw) return;
+  const block = document.createElement('div');
+  block.className = 'taf-expand-block';
+  block.textContent = raw;
+  el.insertAdjacentElement('afterend', block);
+}
+
 function badgeClass(type) {
   if (!type) return "badge-becmg";
   const t = type.toUpperCase();
@@ -414,6 +438,7 @@ function compactWindow(w) {
 
 // ── buildPanel: MET for all legs first, then unified NOTAM block ─────────────
 function buildPanel(ap) {
+  if (ap.taf_raw) _tafRaw[ap.icao] = ap.taf_raw;
   const legs = ap.legs || [{
     leg: 1,
     ref_time:          ap.ref_time,
@@ -445,7 +470,7 @@ function buildPanel(ap) {
     html += `<div class="panel-section">
       <div class="panel-label">Conditions at ${esc(leg.ref_time)}</div>`;
     html += leg.taf_base
-      ? `<div class="panel-value">${esc(leg.taf_base)}</div>`
+      ? `<div class="panel-value taf-clickable" onclick="toggleTaf(this,'${ap.icao}')">${esc(leg.taf_base)}</div>`
       : `<div class="no-data">No TAF</div>`;
     html += `</div>`;
 

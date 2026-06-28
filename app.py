@@ -168,6 +168,7 @@ def _merge_airports_legs(leg_airports_list):
                     "lon":         ap.get("lon"),
                     "runway_info": ap.get("runway_info"),
                     "metar":       ap.get("metar"),
+                    "taf_raw":     ap.get("taf_raw"),
                     "dist_nm":     ap.get("dist_nm"),
                     "legs":        [leg_entry],
                 }

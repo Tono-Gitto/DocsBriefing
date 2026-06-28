@@ -267,6 +267,7 @@ def main():
             "ref_time": ref_dt.strftime("%H%MZ"),
             "dist_nm": round(dist_nm),
             "metar": d["metar"],
+            "taf_raw": d["taf_raw"],
             "taf_base": taf_base,
             "becmg_in_progress": becmg_prog,
             "active_overlays": active_overlays,
