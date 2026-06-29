@@ -69,6 +69,79 @@ _MONTHS = {
 }
 
 
+_ALTN_TABLE_HDR  = re.compile(r"\bALTN\s+DIST\s+TIME\s+FL\s+FUEL\b")
+_ALTN_ROUTE_HDR  = re.compile(r"\bALTN\s+ROUTE\s+TEXT\s+DIST\s+TIME\s+FL\s+FUEL\b")
+_ALTN_ICAO_ROW   = re.compile(r"\b([A-Z]{4})(?:\s+\(F\))?\s+\d{1,4}\s+\d{2}:\d{2}\b")
+_ERA_SLASH_RE    = re.compile(r"\bERA/([A-Z]{4})\b")
+_ERA_FUEL_RE     = re.compile(r"\bFUEL\s+ERA\s+\(([A-Z]{4})\)")
+_RCF_ALTN_RE     = re.compile(r"ROUTE TO SECONDARY DESTINATION ALTERNATE\s+([A-Z]{4})/")
+_RCF_DEST_RE     = re.compile(r"ROUTE TO SECONDARY DESTINATION\s+([A-Z]{4})/")
+
+
+def _extract_alternates(ofp_path):
+    """
+    Parse alternate airport lists from the OFP PDF.
+    Returns dict: {dest_altn: [...], era: [...], rcf_dest: str|None, rcf_altn: [...]}.
+    All lists contain 4-letter ICAO codes. Empty when the section is absent.
+    """
+    lines = []
+    with pdfplumber.open(ofp_path) as pdf:
+        for page in pdf.pages:
+            t = page.extract_text() or ""
+            lines.extend(t.splitlines())
+
+    dest_altn = []
+    era       = []
+    rcf_dest  = None
+    rcf_altn  = []
+    seen_altn = set()
+
+    in_altn_table = False
+    for line in lines:
+        stripped = line.strip()
+
+        if _ALTN_ROUTE_HDR.search(stripped):
+            in_altn_table = False
+            continue
+
+        if _ALTN_TABLE_HDR.search(stripped):
+            in_altn_table = True
+            continue
+
+        if in_altn_table:
+            m = _ALTN_ICAO_ROW.search(stripped)
+            if m:
+                icao = m.group(1)
+                if icao not in seen_altn:
+                    dest_altn.append(icao)
+                    seen_altn.add(icao)
+            else:
+                in_altn_table = False
+
+        # ERA — scan every line regardless
+        for m in _ERA_SLASH_RE.finditer(stripped):
+            ic = m.group(1)
+            if ic not in era:
+                era.append(ic)
+        for m in _ERA_FUEL_RE.finditer(stripped):
+            ic = m.group(1)
+            if ic not in era:
+                era.append(ic)
+
+        # RCF — must check ALTERNATE pattern before DESTINATION pattern
+        m = _RCF_ALTN_RE.search(stripped)
+        if m:
+            ic = m.group(1)
+            if ic not in rcf_altn:
+                rcf_altn.append(ic)
+            continue
+        m = _RCF_DEST_RE.search(stripped)
+        if m and rcf_dest is None:
+            rcf_dest = m.group(1)
+
+    return {"dest_altn": dest_altn, "era": era, "rcf_dest": rcf_dest, "rcf_altn": rcf_altn}
+
+
 def _extract_ofp_constants(ofp_path):
     """
     Read OFP page 1. Returns (etd_utc: datetime, taxi_min: int, flight_time_min: int).
@@ -119,15 +192,20 @@ def _extract_flight_info(ofp_path, etd_utc, flight_time_min):
     reg    = _REG_RE.search(text)
     dm     = _DATE_RE.search(text)
 
+    alts = _extract_alternates(ofp_path)
     return {
-        "flight": "TG" + flight.group(1) if flight else "TG???",
-        "dep":    dep.group(1)  if dep  else "",
-        "dest":   cs.group(2)   if cs   else "",
-        "acft":   cs.group(1)   if cs   else "",
-        "reg":    reg.group(1)  if reg  else "",
-        "date":   f"{dm.group(1)} {dm.group(2)} {2000 + int(dm.group(3))}" if dm else "",
-        "etd":    etd_utc.strftime("%H%MZ"),
-        "eta":    eta_utc.strftime("%H%MZ"),
+        "flight":    "TG" + flight.group(1) if flight else "TG???",
+        "dep":       dep.group(1)  if dep  else "",
+        "dest":      cs.group(2)   if cs   else "",
+        "acft":      cs.group(1)   if cs   else "",
+        "reg":       reg.group(1)  if reg  else "",
+        "date":      f"{dm.group(1)} {dm.group(2)} {2000 + int(dm.group(3))}" if dm else "",
+        "etd":       etd_utc.strftime("%H%MZ"),
+        "eta":       eta_utc.strftime("%H%MZ"),
+        "dest_altn": alts["dest_altn"],
+        "era":       alts["era"],
+        "rcf_dest":  alts["rcf_dest"],
+        "rcf_altn":  alts["rcf_altn"],
     }
 
 
@@ -177,11 +255,114 @@ def _merge_airports_legs(leg_airports_list):
     return list(merged.values())
 
 
-def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeoffs):
-    """Attach per-leg NOTAMs to airports; write airports.json and fir_notams.json."""
+_GENERAL_SECTION_LABELS = {
+    "GENERAL":    "GENERAL INFORMATION",
+    "FLIGHT LEG": "FLIGHT LEG INFORMATION",
+    "AEROPLANE":  "AEROPLANE INFORMATION",
+}
+
+
+def _filter_general_notams(general_db, fir_db, leg_flight_infos):
+    """
+    Two-pass AI filtering for GENERAL / FLIGHT LEG / AEROPLANE NOTAMs.
+
+    Pass 1 — relevance filter: batches of 20, ask model for {id, relevant}.
+              Any ID not returned by the model defaults to relevant=True.
+    Pass 2 — summarise survivors via notam_engine._summarize_notams().
+
+    Returns list of section dicts suitable for general_notams.json.
+    """
+    import anthropic
     import notam_engine
 
-    notam_db, fir_db = notam_engine.parse_notam_pdf(notam_path)
+    legs_summary = " / ".join(f"{fi['dep']}→{fi['dest']}" for fi in leg_flight_infos)
+    acft = leg_flight_infos[0].get("acft", "") if leg_flight_infos else ""
+    fir_list = ", ".join(sorted(fir_db.keys())) or "none"
+
+    filter_system = (
+        "You are a flight dispatcher reviewing NOTAMs for operational relevance. "
+        f"Flight: {legs_summary}. Aircraft type: {acft}. FIRs on route: {fir_list}. "
+        "For each NOTAM below (separated by ---), decide if it could DIRECTLY affect the "
+        "operation of this flight — e.g. requires crew action, affects an airport/route/procedure "
+        "we use, or is a safety/security matter for this aircraft type. "
+        "Exclude administrative, planning, or airspace redesign items with no operational impact. "
+        'Reply with a JSON array only, no other text: [{"id": "...", "relevant": true}, ...]'
+    )
+
+    client = anthropic.Anthropic()
+    output_sections = []
+
+    for key, label in _GENERAL_SECTION_LABELS.items():
+        all_notams = general_db.get(key, [])
+
+        if not all_notams:
+            output_sections.append({"key": key, "label": label, "notams": [], "filtered_out": []})
+            continue
+
+        survivors = []
+        excluded  = []
+
+        for start in range(0, len(all_notams), 20):
+            batch = all_notams[start: start + 20]
+            user_msg = "\n\n---\n\n".join(
+                f'ID: {n["id"]}\n{n["body"]}' for n in batch
+            )
+            verdict_map = {}
+            try:
+                msg = client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=512,
+                    system=filter_system,
+                    messages=[{"role": "user", "content": user_msg}],
+                )
+                verdicts = json.loads(msg.content[0].text.strip())
+                verdict_map = {v["id"]: bool(v.get("relevant", True)) for v in verdicts if "id" in v}
+            except Exception as e:
+                print(f"  WARN: general NOTAM filter failed ({e}); defaulting all to included")
+
+            for n in batch:
+                if verdict_map.get(n["id"], True):  # default include on miss
+                    survivors.append(n)
+                else:
+                    excluded.append(n)
+
+        summaries = notam_engine._summarize_notams({key: survivors}) if survivors else {}
+
+        notams_out = sorted(
+            [
+                {
+                    "id":      n["id"],
+                    "tier":    n["tier"],
+                    "body":    n["body"],
+                    "window":  _fmt_win(n),
+                    "summary": summaries.get((key, n["id"]), n["body"].split("\n")[0]),
+                }
+                for n in survivors
+            ],
+            key=lambda x: x["tier"],
+        )
+        filtered_out = [
+            {"id": n["id"], "tier": n["tier"], "body": n["body"], "window": _fmt_win(n)}
+            for n in excluded
+        ]
+
+        output_sections.append({"key": key, "label": label, "notams": notams_out, "filtered_out": filtered_out})
+
+    return output_sections
+
+
+def _is_active_for_flight(win_start, win_end, flight_start, flight_end):
+    """True if the NOTAM window overlaps the full flight duration [flight_start, flight_end]."""
+    if win_start is None:
+        return True
+    return win_start <= flight_end and (win_end is None or win_end >= flight_start)
+
+
+def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeoffs, leg_flight_infos):
+    """Attach per-leg NOTAMs to airports; write airports.json, fir_notams.json, general_notams.json."""
+    import notam_engine
+
+    notam_db, fir_db, general_db = notam_engine.parse_notam_pdf(notam_path)
 
     # ── Airport NOTAMs per leg ────────────────────────────────────────────────
     for ap in airports:
@@ -222,6 +403,9 @@ def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeo
         json.dump(airports, f, indent=2)
 
     # ── FIR NOTAMs per leg ────────────────────────────────────────────────────
+    flight_start = min(leg_takeoffs)
+    flight_end   = max(leg_takeoffs) + timedelta(hours=24)
+
     fir_merged = {}
     for leg_local, (route_json_path, takeoff_utc) in enumerate(
         zip(leg_routes, leg_takeoffs), start=1
@@ -242,7 +426,7 @@ def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeo
             active_fir = [
                 {"id": n["id"], "tier": n["tier"], "body": n["body"], "window": _fmt_win(n)}
                 for n in fir_data["notams"]
-                if notam_engine._is_active(n["win_start"], n["win_end"], ref_dt)
+                if _is_active_for_flight(n["win_start"], n["win_end"], flight_start, flight_end)
             ]
             active_fir.sort(key=lambda x: x["tier"])
             leg_fir = {"leg": leg_local, "ref_time": ref_dt.strftime("%H%MZ"), "notams": active_fir}
@@ -274,6 +458,15 @@ def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeo
 
     with open(os.path.join(group_dir, "fir_notams.json"), "w") as f:
         json.dump(fir_out, f, indent=2)
+
+    # ── Flight-wide NOTAMs (GENERAL / FLIGHT LEG / AEROPLANE) ─────────────────
+    _progress("  Filtering flight-wide NOTAMs…")
+    general_sections = _filter_general_notams(general_db, fir_db, leg_flight_infos)
+    total_gen = sum(len(s["notams"]) for s in general_sections)
+    total_excl = sum(len(s["filtered_out"]) for s in general_sections)
+    _progress(f"  Flight-wide NOTAMs: {total_gen} relevant, {total_excl} filtered out")
+    with open(os.path.join(group_dir, "general_notams.json"), "w") as f:
+        json.dump(general_sections, f, indent=2)
 
 
 # ── Pipeline background thread ────────────────────────────────────────────────
@@ -347,9 +540,10 @@ def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
 
             # ── Step 5: NOTAM step ────────────────────────────────────────────
             _progress(f"[G{g_num}] Processing NOTAMs — AI summaries take ~2 minutes…")
-            leg_routes   = [os.path.join(group_dir, f"route_{ld['local_idx']}.json") for ld in leg_data]
-            leg_takeoffs = [ld["takeoff_utc"] for ld in leg_data]
-            _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeoffs)
+            leg_routes        = [os.path.join(group_dir, f"route_{ld['local_idx']}.json") for ld in leg_data]
+            leg_takeoffs      = [ld["takeoff_utc"] for ld in leg_data]
+            leg_flight_infos  = [ld["flight_info"] for ld in leg_data]
+            _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeoffs, leg_flight_infos)
 
             # ── Step 6: flight_info.json ──────────────────────────────────────
             fi_out = {"legs": [ld["flight_info"] for ld in leg_data]}

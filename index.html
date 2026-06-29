@@ -182,6 +182,48 @@
     .t3-expand:hover { color: #a0c8ff; }
     .t3-expand:active { background: #161830; }
 
+    /* ── Header action buttons (airport shortcuts + FLIGHT) ── */
+    #header-actions {
+      margin-left: auto;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .ap-btn {
+      background: #1a1c3a; border: 1px solid #2a2d50;
+      border-radius: 6px; padding: 6px 10px;
+      font-size: 0.75rem; font-weight: 700;
+      letter-spacing: 0.1em;
+      cursor: pointer; touch-action: manipulation;
+      white-space: nowrap;
+    }
+    .ap-btn:hover  { background: #22254a; border-color: #4a5080; }
+    .ap-btn:active { background: #2a2e58; }
+    #flightBtn {
+      background: #1a1c3a; border: 1px solid #2a2d50;
+      border-radius: 6px; padding: 6px 14px;
+      font-size: 0.75rem; font-weight: 700;
+      letter-spacing: 0.1em; color: #a0c8ff;
+      cursor: pointer; touch-action: manipulation;
+      display: flex; align-items: center; gap: 6px;
+      white-space: nowrap;
+    }
+    #flightBtn:hover  { background: #22254a; border-color: #4a5080; }
+    #flightBtn:active { background: #2a2e58; }
+    #flightBadge {
+      font-size: 0.65rem; font-weight: 700;
+      padding: 2px 6px; border-radius: 3px;
+      display: none;
+    }
+    #flightBadge.badge-t1 { display: inline-block; background: #4a1010; color: #ff8080; }
+    #flightBadge.badge-t2 { display: inline-block; background: #3a2a00; color: #ffc060; }
+
+    /* ── Flight-wide NOTAM filtered-out expand ── */
+    .filtered-expand {
+      font-size: 0.75rem; color: #445; cursor: pointer; touch-action: manipulation;
+      min-height: 44px; display: flex; align-items: center; justify-content: center;
+      border-top: 1px dotted #1a1d3a; margin-top: 6px;
+    }
+    .filtered-expand:hover { color: #778; }
+
     /* ── Status chip ── */
     #status {
       position: fixed; bottom: 16px; right: 16px; z-index: 1000;
@@ -234,6 +276,9 @@
 <div id="header">
   <h1 id="hdr-title">Preflight Briefing</h1>
   <span id="hdr-sub"></span>
+  <div id="header-actions">
+    <button id="flightBtn" onclick="openFlightPanel()">FLIGHT <span id="flightBadge"></span></button>
+  </div>
 </div>
 
 <div id="map"></div>
@@ -369,6 +414,7 @@ function clearNotamFilter() {
 }
 
 const _tafRaw = {};
+let _generalNotams = [];
 function toggleTaf(el, icao) {
   const next = el.nextElementSibling;
   if (next && next.classList.contains('taf-expand-block')) {
@@ -581,21 +627,9 @@ function buildFirPanel(f) {
       html += notamRowUnified(n, legNums.length < legs.length ? legNums : null);
     });
 
-    if (t3.length <= 5) {
-      t3.forEach(({ notam: n, legNums }) => {
-        html += notamRowUnified(n, legNums.length < legs.length ? legNums : null);
-      });
-    } else {
-      t3.slice(0, 5).forEach(({ notam: n, legNums }) => {
-        html += notamRowUnified(n, legNums.length < legs.length ? legNums : null);
-      });
-      const uid = 't3-fir-unified';
-      html += `<div id="${uid}-more" style="display:none">`;
-      t3.slice(5).forEach(({ notam: n, legNums }) => {
-        html += notamRowUnified(n, legNums.length < legs.length ? legNums : null);
-      });
-      html += `</div><div class="t3-expand" onclick="expandT3('${uid}', this)">show ${t3.length - 5} more T3 ▾</div>`;
-    }
+    t3.forEach(({ notam: n, legNums }) => {
+      html += notamRowUnified(n, legNums.length < legs.length ? legNums : null);
+    });
 
     legs.forEach(leg => {
       if ((leg.notams || []).length === 0) {
@@ -622,20 +656,80 @@ function buildFirNotamSection(leg) {
 
   t1t2.forEach(n => { html += notamRow(n, leg.leg); });
 
-  if (t3.length <= 5) {
-    t3.forEach(n => { html += notamRow(n, leg.leg); });
-  } else {
-    t3.slice(0, 5).forEach(n => { html += notamRow(n, leg.leg); });
-    const uid = `t3-fir-l${leg.leg}`;
-    html += `<div id="${uid}-more" style="display:none">`;
-    t3.slice(5).forEach(n => { html += notamRow(n, leg.leg); });
-    html += `</div>
-      <div class="t3-expand" onclick="expandT3('${uid}', this)">
-        show ${t3.length - 5} more T3 ▾
-      </div>`;
-  }
+  t3.forEach(n => { html += notamRow(n, leg.leg); });
 
   return html + `</div>`;
+}
+
+// ── Flight-wide NOTAM panel ────────────────────────────────────────────────
+function openFlightPanel() {
+  document.getElementById('panel-content').innerHTML = buildFlightPanel(_generalNotams);
+  document.body.classList.add('panel-open');
+}
+
+function buildFlightPanel(sections) {
+  let html = `<div class="panel-head">
+    <div class="panel-icao">FLIGHT BRIEFING</div>
+    <div class="panel-name" style="color:#667;font-size:0.82rem">General · Flight Leg · Aeroplane</div>
+  </div>`;
+
+  sections.forEach(sec => {
+    html += `<div class="panel-section">
+      <div class="panel-label">${esc(sec.label)}</div>`;
+
+    const notams = sec.notams || [];
+    const filtered = sec.filtered_out || [];
+
+    if (notams.length === 0) {
+      html += `<div class="no-data">No relevant NOTAMs</div>`;
+    } else {
+      const t1t2 = notams.filter(n => n.tier < 3);
+      const t3   = notams.filter(n => n.tier === 3);
+      t1t2.forEach(n => { html += notamRow(n, 0); });
+      if (t3.length <= 5) {
+        t3.forEach(n => { html += notamRow(n, 0); });
+      } else {
+        t3.slice(0, 5).forEach(n => { html += notamRow(n, 0); });
+        const uid = `t3-gen-${sec.key.replace(/\s/g, '_')}`;
+        html += `<div id="${uid}-more" style="display:none">`;
+        t3.slice(5).forEach(n => { html += notamRow(n, 0); });
+        html += `</div>
+          <div class="t3-expand" onclick="expandT3('${uid}', this)">
+            show ${t3.length - 5} more T3 ▾
+          </div>`;
+      }
+    }
+
+    if (filtered.length > 0) {
+      const uid = `filt-gen-${sec.key.replace(/\s/g, '_')}`;
+      html += `<div id="${uid}-more" style="display:none">`;
+      filtered.forEach(n => { html += notamRow(n, 0); });
+      html += `</div>
+        <div class="filtered-expand" onclick="expandT3('${uid}', this)">
+          AI filtered out ${filtered.length} NOTAM${filtered.length > 1 ? 's' : ''} · tap to review ▾
+        </div>`;
+    }
+
+    html += `</div>`;
+  });
+
+  return html;
+}
+
+function _updateFlightBadge(sections) {
+  const allNotams = sections.flatMap(s => s.notams || []);
+  const badge = document.getElementById('flightBadge');
+  if (!badge) return;
+  const t1count = allNotams.filter(n => n.tier === 1).length;
+  const t2count = allNotams.filter(n => n.tier === 2).length;
+  badge.className = '';
+  if (t1count > 0) {
+    badge.textContent = t1count;
+    badge.className = 'badge-t1';
+  } else if (t2count > 0) {
+    badge.textContent = t2count;
+    badge.className = 'badge-t2';
+  }
 }
 
 // ── Icons ──────────────────────────────────────────────────────────────────
@@ -679,6 +773,50 @@ function markerSize(icao) {
 }
 function markerZIndex(icao) {
   return (depSet.has(icao) || destSet.has(icao)) ? 100 : 0;
+}
+
+// ── Header airport shortcut buttons ──────────────────────────────────────
+function renderHeaderAirportBtns(airports, legs) {
+  const apMap = Object.fromEntries(airports.map(a => [a.icao, a]));
+  const seen  = new Set();
+  const ordered = [];
+
+  // 1. Dep/dest in leg order, deduped (green)
+  legs.forEach(l => {
+    [l.dep, l.dest].forEach(icao => {
+      if (icao && !seen.has(icao) && apMap[icao]) {
+        ordered.push({ ap: apMap[icao], color: '#4cff91' });
+        seen.add(icao);
+      }
+    });
+  });
+
+  // 2. Alternates from OFP data (dark pink): dest_altn, era, rcf_dest, rcf_altn
+  const pinkIcaos = [];
+  legs.forEach(l => {
+    (l.dest_altn || []).forEach(ic => pinkIcaos.push(ic));
+    (l.era       || []).forEach(ic => pinkIcaos.push(ic));
+    if (l.rcf_dest) pinkIcaos.push(l.rcf_dest);
+    (l.rcf_altn  || []).forEach(ic => pinkIcaos.push(ic));
+  });
+  pinkIcaos.forEach(icao => {
+    if (!seen.has(icao) && apMap[icao]) {
+      ordered.push({ ap: apMap[icao], color: '#d060a0' });
+      seen.add(icao);
+    }
+  });
+
+  const actions   = document.getElementById('header-actions');
+  const flightBtn = document.getElementById('flightBtn');
+  ordered.forEach(({ ap, color }) => {
+    const btn = document.createElement('button');
+    btn.className   = 'ap-btn';
+    btn.textContent = ap.icao;
+    btn.title       = ap.name || ap.icao;
+    btn.style.color = color;
+    btn.onclick     = () => openPanel(ap);
+    actions.insertBefore(btn, flightBtn);
+  });
 }
 
 // ── Main data loading ──────────────────────────────────────────────────────
@@ -742,10 +880,21 @@ Promise.all([
       .addTo(map);
   });
 
+  renderHeaderAirportBtns(airports, legs);
+
 }).catch(e => {
   console.error("Data load failed:", e);
   document.getElementById("status").textContent = "Load failed: " + e.message;
 });
+
+// ── General / flight-wide NOTAMs ──────────────────────────────────────────
+fetch(DATA("general_notams.json"))
+  .then(r => r.json())
+  .then(sections => {
+    _generalNotams = sections;
+    _updateFlightBadge(sections);
+  })
+  .catch(() => {});  // absent on legacy / MVP runs — silently ignore
 
 // ── FIR markers ───────────────────────────────────────────────────────────
 fetch(DATA("fir_notams.json"))
@@ -757,7 +906,7 @@ fetch(DATA("fir_notams.json"))
       const allFirNotams = legs.flatMap(l => l.notams || []);
       if (!allFirNotams.length) return;
 
-      const color = allFirNotams.some(n => n.tier === 1) ? "#ff8080" : "#1a1a2e";
+      const color = allFirNotams.some(n => n.tier <= 2) ? "#c8a800" : "#1a1a2e";
       const tip   = `${f.fir} — ${f.name} (${allFirNotams.length})`;
       L.marker([f.lat, f.lon], { icon: firIcon(color), zIndexOffset: 50 })
         .bindTooltip(tip, { direction: "top", offset: [0, -8] })

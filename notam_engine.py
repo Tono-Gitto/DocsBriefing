@@ -59,7 +59,7 @@ _FIR_HDR_RE = re.compile(r"^([A-Z]{4})\s*/\s*(.+(?:FIR|UIR).*)\s*$")
 
 # Main section headers — reset current airport / FIR context
 _MAIN_SECT_RE = re.compile(
-    r"^(GENERAL|FLIGHT LEG|AERODROME|ENROUTE|ADDITIONAL)\s+INFORMATION\s*$"
+    r"^(GENERAL|FLIGHT LEG|AERODROME|ENROUTE|ADDITIONAL|AEROPLANE)\s+INFORMATION\s*$"
 )
 
 # NOTAM ID: optional leading *, then series/year (date issued in parens)
@@ -131,9 +131,7 @@ _T2_LINE_RE = re.compile(
 )
 
 _T1_FIR_RE = re.compile(
-    r"(\bRESTRICTED AREA\b.+\bACTIVE\b"
-    r"|\bDANGER AREA\b.+\bACTIVE\b"
-    r"|\bROUTE\b.+\bNOT AVBL\b"
+    r"(\bROUTE\b.+\bNOT AVBL\b"
     r")",
     re.IGNORECASE,
 )
@@ -143,6 +141,7 @@ _T2_FIR_RE = re.compile(
     r"|\bDME\b.+\b(U/S|SUSPENDED|MAINT|DO NOT USE|UNSERVICEABLE)\b"
     r"|\bDVOR/DME\b.+\b(SUSPENDED|U/S)\b"
     r"|\bNDB\b.+\b(U/S|SUSPENDED|UNSERVICEABLE)\b"
+    r"|\bROUTE\b.+\b(AVBL|AVAILABLE)\b"
     r")",
     re.IGNORECASE,
 )
@@ -370,20 +369,25 @@ def _nearest_waypoint(lat, lon, route_pts):
 
 # ── NOTAM PDF parser ──────────────────────────────────────────────────────────
 
+_GENERAL_SECTIONS = {"GENERAL", "FLIGHT LEG", "AEROPLANE"}
+
+
 def parse_notam_pdf(pdf_path):
     """
     Return:
-      result:     {icao: [notam_dict, ...]}                           — airport sections
-      fir_result: {fir_icao: {"name": str, "notams": [notam_dict]}}  — ENROUTE section
+      result:       {icao: [notam_dict, ...]}                           — airport sections
+      fir_result:   {fir_icao: {"name": str, "notams": [notam_dict]}}  — ENROUTE section
+      general_result: {"GENERAL": [...], "FLIGHT LEG": [...], "AEROPLANE": [...]}
 
     Each notam_dict: {id, tier, body, win_start, win_end}
     """
     clean = _get_clean_lines(pdf_path)
-    result     = {}
-    fir_result = {}
-    current_ap  = None
-    current_fir = None
-    in_enroute  = False
+    result         = {}
+    fir_result     = {}
+    general_result = {"GENERAL": [], "FLIGHT LEG": [], "AEROPLANE": []}
+    current_ap      = None
+    current_fir     = None
+    current_section = ""
 
     cur_id        = None
     cur_body      = []
@@ -396,7 +400,8 @@ def parse_notam_pdf(pdf_path):
         nonlocal cur_id, cur_body, cur_win_s, cur_win_e, cur_is_ci, cur_see_attch
         if cur_id and not cur_see_attch:
             body_lines = [l for l in cur_body if l]
-            tier = _classify_tier(body_lines, is_fir=in_enroute)
+            is_fir = current_section == "ENROUTE"
+            tier = _classify_tier(body_lines, is_fir=is_fir)
             notam = {
                 "id":        cur_id,
                 "tier":      tier,
@@ -404,10 +409,12 @@ def parse_notam_pdf(pdf_path):
                 "win_start": cur_win_s,
                 "win_end":   cur_win_e,
             }
-            if in_enroute and current_fir:
+            if current_section == "ENROUTE" and current_fir:
                 fir_result[current_fir]["notams"].append(notam)
-            elif not in_enroute and current_ap:
+            elif current_section in ("AERODROME", "ADDITIONAL") and current_ap:
                 result.setdefault(current_ap, []).append(notam)
+            elif current_section in _GENERAL_SECTIONS:
+                general_result[current_section].append(notam)
         cur_id        = None
         cur_body      = []
         cur_win_s     = None
@@ -419,16 +426,17 @@ def parse_notam_pdf(pdf_path):
 
     for line in clean:
         # ── Main section header → reset context
-        if _MAIN_SECT_RE.match(line):
+        m_sect = _MAIN_SECT_RE.match(line)
+        if m_sect:
             flush()
-            in_enroute  = "ENROUTE" in line
+            current_section = m_sect.group(1)
             current_ap  = None
             current_fir = None
             expecting_window = False
             continue
 
-        # ── Sub-section header: FIR in ENROUTE, airport otherwise
-        if in_enroute:
+        # ── Sub-section header: FIR in ENROUTE, airport in AERODROME/ADDITIONAL
+        if current_section == "ENROUTE":
             m = _FIR_HDR_RE.match(line)
             if m:
                 flush()
@@ -438,7 +446,7 @@ def parse_notam_pdf(pdf_path):
                 fir_result[current_fir]["name"] = name
                 expecting_window = False
                 continue
-        else:
+        elif current_section in ("AERODROME", "ADDITIONAL"):
             m = _AP_HDR_RE.match(line)
             if m:
                 flush()
@@ -468,10 +476,11 @@ def parse_notam_pdf(pdf_path):
         # ── Skip if no active context
         if cur_id is None:
             continue
-        if in_enroute and current_fir is None:
+        if current_section == "ENROUTE" and current_fir is None:
             continue
-        if not in_enroute and current_ap is None:
+        if current_section in ("AERODROME", "ADDITIONAL") and current_ap is None:
             continue
+        # GENERAL / FLIGHT LEG / AEROPLANE: no sub-header required — accumulate directly
 
         # ── See-attachment marker → discard NOTAM body
         if _SKIP_BODY_RE.match(line):
@@ -479,7 +488,7 @@ def parse_notam_pdf(pdf_path):
             continue
 
         # ── UNTIL-style window in body line (FIR NOTAMs; strip from displayed body)
-        if in_enroute and cur_win_s is None:
+        if current_section == "ENROUTE" and cur_win_s is None:
             m_until = _UNTIL_RE.match(line)
             if m_until:
                 try:
@@ -492,7 +501,7 @@ def parse_notam_pdf(pdf_path):
         cur_body.append(line)
 
     flush()
-    return result, fir_result
+    return result, fir_result, general_result
 
 
 # ── NOTAM summarisation ───────────────────────────────────────────────────────
@@ -553,12 +562,14 @@ def main():
     with open(ROUTE_JSON) as f:
         route_pts = json.load(f)
 
-    notam_db, fir_db = parse_notam_pdf(NOTAM_PDF)
+    notam_db, fir_db, general_db = parse_notam_pdf(NOTAM_PDF)
 
     total_raw = sum(len(v) for v in notam_db.values())
     total_fir = sum(len(v["notams"]) for v in fir_db.values())
+    total_gen = sum(len(v) for v in general_db.values())
     print(f"Raw NOTAMs parsed: {total_raw} airport ({len(notam_db)} airports),  "
-          f"{total_fir} FIR ({len(fir_db)} FIRs)")
+          f"{total_fir} FIR ({len(fir_db)} FIRs),  "
+          f"{total_gen} general ({', '.join(f'{k}:{len(v)}' for k,v in general_db.items() if v)})")
 
     # ── Airport NOTAMs ────────────────────────────────────────────────────────
     matched = 0
