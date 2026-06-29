@@ -126,6 +126,8 @@ _T2_LINE_RE = re.compile(
     r"|\bDVOR/DME\b.+\b(SUSPENDED|U/S)\b"
     r"|\bMSSR\b.+\b(U/S|UNSERVICEABLE)\b"
     r"|\bRADAR\b.+\b(U/S|UNRELIABLE)\b"
+    r"|\bGROUP\s+[BC]\b.+\bAERODROME\b"
+    r"|\bAERODROME\b.+\bGROUP\s+[BC]\b"
     r")",
     re.IGNORECASE,
 )
