@@ -756,17 +756,15 @@ function firIcon(color) {
   });
 }
 
-// ── Marker color: dep=green, dest=red, turnaround=amber, met=light-blue ───
+// ── Marker color: dep/dest/turnaround=green, alternate=dark-pink, met=light-blue ──
 let depSet  = new Set();
 let destSet = new Set();
+let altnSet = new Set();
 
 function markerColor(icao) {
-  const isDep  = depSet.has(icao);
-  const isDest = destSet.has(icao);
-  if (isDep && isDest) return "#ffc107";  // amber = turnaround
-  if (isDep)           return "#4cff91";  // green = departure
-  if (isDest)          return "#ff6b6b";  // red = destination
-  return "#a0c8ff";                       // light blue = enroute MET
+  if (depSet.has(icao) || destSet.has(icao)) return "#4cff91";  // green = dep/dest/turnaround
+  if (altnSet.has(icao))                     return "#d060a0";  // dark pink = alternate
+  return "#a0c8ff";                                             // light blue = enroute MET
 }
 function markerSize(icao) {
   return (depSet.has(icao) || destSet.has(icao)) ? 26 : 20;
@@ -814,7 +812,7 @@ function renderHeaderAirportBtns(airports, legs) {
     btn.textContent = ap.icao;
     btn.title       = ap.name || ap.icao;
     btn.style.color = color;
-    btn.onclick     = () => openPanel(ap);
+    btn.onclick     = () => { openPanel(ap); map.flyTo([ap.lat, ap.lon], Math.max(map.getZoom(), 7)); };
     actions.insertBefore(btn, flightBtn);
   });
 }
@@ -831,6 +829,10 @@ Promise.all([
   legs.forEach(l => {
     if (l.dep)  depSet.add(l.dep);
     if (l.dest) destSet.add(l.dest);
+    (l.dest_altn || []).forEach(ic => altnSet.add(ic));
+    (l.era       || []).forEach(ic => altnSet.add(ic));
+    if (l.rcf_dest) altnSet.add(l.rcf_dest);
+    (l.rcf_altn  || []).forEach(ic => altnSet.add(ic));
   });
 
   // Header: show all legs
