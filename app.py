@@ -212,13 +212,14 @@ def _extract_flight_info(ofp_path, etd_utc, flight_time_min):
 # ── NOTAM window formatter ────────────────────────────────────────────────────
 
 def _fmt_win(n):
-    if not n.get("win_start"):
-        return None
-    return (
-        n["win_start"].strftime("%-d %b %Y %H:%MZ")
-        + " – "
-        + n["win_end"].strftime("%-d %b %Y %H:%MZ")
-    )
+    if n.get("win_start"):
+        return (
+            n["win_start"].strftime("%-d %b %Y %H:%MZ")
+            + " – "
+            + n["win_end"].strftime("%-d %b %Y %H:%MZ")
+        )
+    import notam_engine
+    return notam_engine._fmt_daily_windows(n.get("daily_windows"))
 
 
 # ── Multi-leg helpers ─────────────────────────────────────────────────────────
@@ -377,7 +378,7 @@ def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeo
             )
             raw = notam_db.get(ap["icao"], [])
             active = [
-                {"id": n["id"], "tier": n["tier"], "body": n["body"], "window": _fmt_win(n)}
+                {"id": n["id"], "tier": notam_engine._effective_tier(n, ref_dt), "body": n["body"], "window": _fmt_win(n)}
                 for n in raw
                 if notam_engine._is_active(n["win_start"], n["win_end"], ref_dt)
             ]

@@ -89,10 +89,92 @@ _UNTIL_FMT = "%d %b %y %H:%M"
 _SKIP_BODY_RE = re.compile(r"^//\s*\(SEE ATTCH\)\s*//$")
 
 
+# ── Daily operating window helpers ────────────────────────────────────────────
+
+# Matches HHMM-HHMM pairs (with optional whitespace around dash)
+_HHMM_PAIR_RE = re.compile(r'\b(\d{4})\s*-\s*(\d{4})\b')
+# A line consisting ONLY of time slots: digits, spaces, dashes, slashes, commas, dots
+_PURE_TIME_LINE_RE = re.compile(r'^[\d\s\-/,\.]+$')
+
+def _hhmm_to_min(s):
+    return int(s[:2]) * 60 + int(s[2:])
+
+def _parse_daily_windows(body_lines):
+    """Extract daily HHMM-HHMM operating slots from body.
+    Returns [(start_min, end_min), ...] or [] if no daily window detected.
+    Three patterns recognised:
+      1. First non-empty body line is purely time slots  →  "1800-2200" / "0200-0530 0730-0830"
+      2. DAILY keyword anywhere in body                  →  "DAILY 0430-0930, 1230-1530"
+      3. "Closure Period (UTC) HHMM-HHMM"
+    """
+    # Pattern 1: first non-empty line is pure time slots
+    for line in body_lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if (_PURE_TIME_LINE_RE.match(stripped)
+                and _HHMM_PAIR_RE.search(stripped)):
+            slots = [(_hhmm_to_min(m.group(1)), _hhmm_to_min(m.group(2)))
+                     for m in _HHMM_PAIR_RE.finditer(stripped)]
+            if slots:
+                return slots
+        break  # only inspect first non-empty line
+
+    full = " ".join(body_lines)
+
+    # Pattern 2: DAILY keyword
+    daily_m = re.search(r'\bDAILY\b(.{0,150})', full, re.IGNORECASE)
+    if daily_m:
+        slots = [(_hhmm_to_min(m.group(1)), _hhmm_to_min(m.group(2)))
+                 for m in _HHMM_PAIR_RE.finditer(daily_m.group(0))]
+        if slots:
+            return slots
+
+    # Pattern 3: "Closure Period (UTC) HHMM-HHMM"
+    cp = re.search(r'Closure Period\s*\(UTC\)\s*(\d{4})\s*-\s*(\d{4})', full, re.IGNORECASE)
+    if cp:
+        return [(_hhmm_to_min(cp.group(1)), _hhmm_to_min(cp.group(2)))]
+
+    return []
+
+
+def _is_active_daily(daily_windows, ref_dt):
+    """True if ref_dt's time falls in any slot, or if no daily windows were parsed."""
+    if not daily_windows:
+        return True
+    ref_min = ref_dt.hour * 60 + ref_dt.minute
+    for s, e in daily_windows:
+        if e < s:  # slot crosses midnight (e.g. 2200-0400)
+            if ref_min >= s or ref_min <= e:
+                return True
+        else:
+            if s <= ref_min <= e:
+                return True
+    return False
+
+
+def _effective_tier(n, ref_dt):
+    """Return tier, downgraded to 3 if ref_dt is outside the NOTAM's daily operating window."""
+    daily = n.get("daily_windows") or []
+    if daily and not _is_active_daily(daily, ref_dt):
+        return 3
+    return n["tier"]
+
+
+def _fmt_daily_windows(daily_windows):
+    """Format for display: 'Daily 1800–2200Z' or 'Daily 0200–0530, 0730–0830Z'."""
+    if not daily_windows:
+        return None
+    def slot(s, e):
+        return f"{s//60:02d}{s%60:02d}–{e//60:02d}{e%60:02d}Z"
+    return "Daily " + ", ".join(slot(s, e) for s, e in daily_windows)
+
+
 # ── Tier classification ───────────────────────────────────────────────────────
 
 _T1_LINE_RE = re.compile(
     r"(\bRWY\b\s+\S+\s+CLSD\b"
+    r"|\bRWY\d\S*\s+CLSD\b"
     r"|\bRUNWAY\b.+\bCLSD\b"
     r"|\bILS\b.+\b(U/S|OUT OF SERVICE|DOWNGRADED|SUSPENDED|UNSERVICEABLE)\b"
     r"|\bDME\b.+\b(U/S|SUSPENDED|MAINT|DO NOT USE|UNSERVICEABLE)\b"
@@ -101,6 +183,10 @@ _T1_LINE_RE = re.compile(
     r"|\bLPV\b.+\b(SUSPENDED|U/S)\b"
     r"|\bAPCH\b.+\b(U/S|SUSPENDED)\b"
     r"|\bLOC\b.+\b(U/S|SUSPENDED|UNSERVICEABLE)\b"
+    r"|\bPAPI\b.+\b(U/S|UNSERVICEABLE)\b"
+    r"|\bPALS\b.+\b(U/S|UNSERVICEABLE|MAINT)\b"
+    r"|\bSALS\b.+\b(U/S|UNSERVICEABLE|MAINT)\b"
+    r"|\bTHR IDENTIFICATION LIGHTS\b.+\bU/S\b"
     r"|\bFALSE INDICATION\b"
     r"|\bOUT OF SERVICE\b"
     r"|\bRESTRICTED AREA\b.+\bACTIVE\b"
@@ -118,10 +204,6 @@ _T2_LINE_RE = re.compile(
     r"|\bSTAND\b.+\bCLSD\b"
     r"|\bVDGS\b.+\b(U/S|UNSERVICEABLE|MAINT)\b"
     r"|\bRETIL\b.+\b(U/S|UNSERVICEABLE)\b"
-    r"|\bPAPI\b.+\b(U/S|UNSERVICEABLE)\b"
-    r"|\bPALS\b.+\b(U/S|UNSERVICEABLE|MAINT)\b"
-    r"|\bSALS\b.+\b(U/S|UNSERVICEABLE|MAINT)\b"
-    r"|\bTHR IDENTIFICATION LIGHTS\b.+\bU/S\b"
     r"|\bA-VDGS\b.+\b(U/S|UNSERVICEABLE)\b"
     r"|\bDVOR/DME\b.+\b(SUSPENDED|U/S)\b"
     r"|\bMSSR\b.+\b(U/S|UNSERVICEABLE)\b"
@@ -381,7 +463,7 @@ def parse_notam_pdf(pdf_path):
       fir_result:   {fir_icao: {"name": str, "notams": [notam_dict]}}  — ENROUTE section
       general_result: {"GENERAL": [...], "FLIGHT LEG": [...], "AEROPLANE": [...]}
 
-    Each notam_dict: {id, tier, body, win_start, win_end}
+    Each notam_dict: {id, tier, body, win_start, win_end, daily_windows}
     """
     clean = _get_clean_lines(pdf_path)
     result         = {}
@@ -405,11 +487,12 @@ def parse_notam_pdf(pdf_path):
             is_fir = current_section == "ENROUTE"
             tier = _classify_tier(body_lines, is_fir=is_fir)
             notam = {
-                "id":        cur_id,
-                "tier":      tier,
-                "body":      "\n".join(body_lines),
-                "win_start": cur_win_s,
-                "win_end":   cur_win_e,
+                "id":            cur_id,
+                "tier":          tier,
+                "body":          "\n".join(body_lines),
+                "win_start":     cur_win_s,
+                "win_end":       cur_win_e,
+                "daily_windows": _parse_daily_windows(body_lines) if not is_fir else [],
             }
             if current_section == "ENROUTE" and current_fir:
                 fir_result[current_fir]["notams"].append(notam)
@@ -587,13 +670,13 @@ def main():
         active = [
             {
                 "id":   n["id"],
-                "tier": n["tier"],
+                "tier": _effective_tier(n, ref_dt),
                 "body": n["body"],
                 "window": (
                     n["win_start"].strftime("%-d %b %Y %H:%MZ")
                     + " – "
                     + n["win_end"].strftime("%-d %b %Y %H:%MZ")
-                ) if n["win_start"] else None,
+                ) if n["win_start"] else _fmt_daily_windows(n.get("daily_windows")),
             }
             for n in notams_raw
             if _is_active(n["win_start"], n["win_end"], ref_dt)
