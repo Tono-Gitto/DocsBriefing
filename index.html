@@ -172,6 +172,15 @@
       border-radius: 4px; padding: 6px 8px;
       margin-top: 5px; word-break: break-all; white-space: pre-wrap;
     }
+    .notam-clickable { cursor: pointer; }
+    .notam-clickable:hover { text-decoration: underline dotted #6e7681; }
+    .notam-expand-block {
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 0.72rem; color: #8b949e;
+      background: #0d1117; border: 1px solid #30363d;
+      border-radius: 4px; padding: 6px 8px;
+      margin-top: 5px; word-break: break-all; white-space: pre-wrap;
+    }
 
     /* 44px min-height touch target for "show N more" */
     .t3-expand {
@@ -414,6 +423,7 @@ function clearNotamFilter() {
 }
 
 const _tafRaw = {};
+const _notamBody = {};
 let _generalNotams = [];
 function toggleTaf(el, icao) {
   const next = el.nextElementSibling;
@@ -425,6 +435,20 @@ function toggleTaf(el, icao) {
   if (!raw) return;
   const block = document.createElement('div');
   block.className = 'taf-expand-block';
+  block.textContent = raw;
+  el.insertAdjacentElement('afterend', block);
+}
+
+function toggleNotam(el, safeId) {
+  const next = el.nextElementSibling;
+  if (next && next.classList.contains('notam-expand-block')) {
+    next.remove();
+    return;
+  }
+  const raw = _notamBody[safeId] || '';
+  if (!raw) return;
+  const block = document.createElement('div');
+  block.className = 'notam-expand-block';
   block.textContent = raw;
   el.insertAdjacentElement('afterend', block);
 }
@@ -444,12 +468,17 @@ function notamRow(n, legNum) {
   const win    = compactWindow(n.window);
   const safeId = n.id.replace(/[^a-zA-Z0-9]/g, '_');
   const domId  = `notam-l${legNum}-${safeId}`;
+  const shown   = n.summary || n.body;
+  const canExp  = n.summary && n.body && n.summary !== n.body;
+  if (canExp) _notamBody[safeId] = n.body;
   let row = `<div class="notam-row" id="${domId}" data-notam-id="${safeId}">
     <div class="notam-header">
       <span class="badge ${tierClass}">${tierLabel}</span>
       <span class="notam-id">${esc(n.id)}</span>`;
   if (win) row += `<span class="notam-window">${esc(win)}</span>`;
-  row += `</div><div class="notam-body">${esc(n.summary || n.body)}</div></div>`;
+  row += `</div><div class="notam-body${canExp ? ' notam-clickable' : ''}"${
+    canExp ? ` onclick="toggleNotam(this,'${safeId}')"` : ''
+  }>${esc(shown)}</div></div>`;
   return row;
 }
 
@@ -462,12 +491,17 @@ function notamRowUnified(n, legNums) {
   const chips  = legNums
     ? legNums.map(num => `<span class="leg-chip${num === 2 ? ' leg2' : ''}">L${num}</span>`).join('')
     : '';
+  const shown  = n.summary || n.body;
+  const canExp = n.summary && n.body && n.summary !== n.body;
+  if (canExp) _notamBody[safeId] = n.body;
   let row = `<div class="notam-row" id="notam-u-${safeId}" data-notam-id="${safeId}">
     <div class="notam-header">
       <span class="badge ${tierClass}">${tierLabel}</span>${chips}
       <span class="notam-id">${esc(n.id)}</span>`;
   if (win) row += `<span class="notam-window">${esc(win)}</span>`;
-  row += `</div><div class="notam-body">${esc(n.summary || n.body)}</div></div>`;
+  row += `</div><div class="notam-body${canExp ? ' notam-clickable' : ''}"${
+    canExp ? ` onclick="toggleNotam(this,'${safeId}')"` : ''
+  }>${esc(shown)}</div></div>`;
   return row;
 }
 
