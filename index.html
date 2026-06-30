@@ -823,10 +823,10 @@ function renderHeaderAirportBtns(airports, legs) {
     });
   });
 
-  // 2. Alternates from OFP data (dark pink): dest_altn, era, rcf_dest, rcf_altn
+  // 2. Alternates from OFP data (dark pink): primary dest_altn only, all era/rcf
   const pinkIcaos = [];
   legs.forEach(l => {
-    (l.dest_altn || []).forEach(ic => pinkIcaos.push(ic));
+    if (l.dest_altn && l.dest_altn[0]) pinkIcaos.push(l.dest_altn[0]);
     (l.era       || []).forEach(ic => pinkIcaos.push(ic));
     if (l.rcf_dest) pinkIcaos.push(l.rcf_dest);
     (l.rcf_altn  || []).forEach(ic => pinkIcaos.push(ic));

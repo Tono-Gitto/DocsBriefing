@@ -153,10 +153,51 @@ def _is_active_daily(daily_windows, ref_dt):
     return False
 
 
+# ── Date-specific schedule helpers ───────────────────────────────────────────
+
+_MONTH_NUM = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+              "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+_DATE_SCHED_RE = re.compile(
+    r'\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+(\d{1,2})\s+(\d{4})-(\d{4})\b',
+    re.IGNORECASE,
+)
+
+def _parse_date_schedules(body_lines):
+    """Extract date-specific time slots from body: [(month, day, start_min, end_min), ...].
+    Handles: '"JUN 29 1900-2330, JUL 02 1900-2330"' → [(6,29,1140,1410),(7,2,1140,1410)].
+    Returns [] if no date-specific schedule found."""
+    full = " ".join(body_lines)
+    results = []
+    for m in _DATE_SCHED_RE.finditer(full):
+        results.append((
+            _MONTH_NUM[m.group(1).upper()],
+            int(m.group(2)),
+            _hhmm_to_min(m.group(3)),
+            _hhmm_to_min(m.group(4)),
+        ))
+    return results
+
+
+def _is_active_date_schedule(date_sched, ref_dt):
+    """True if ref_dt's date+time falls within any listed entry, or if no schedule.
+    False if schedule exists but ref_dt's date is not listed (or time is outside window)."""
+    if not date_sched:
+        return True
+    ref_min = ref_dt.hour * 60 + ref_dt.minute
+    for month, day, s, e in date_sched:
+        if month == ref_dt.month and day == ref_dt.day:
+            if e < s:  # crosses midnight
+                return ref_min >= s or ref_min <= e
+            return s <= ref_min <= e
+    return False  # ref_dt's date not listed
+
+
 def _effective_tier(n, ref_dt):
-    """Return tier, downgraded to 3 if ref_dt is outside the NOTAM's daily operating window."""
+    """Return tier, downgraded to 3 if ref_dt is outside the NOTAM's operating schedule."""
     daily = n.get("daily_windows") or []
     if daily and not _is_active_daily(daily, ref_dt):
+        return 3
+    if not _is_active_date_schedule(n.get("date_schedules") or [], ref_dt):
         return 3
     return n["tier"]
 
@@ -492,7 +533,8 @@ def parse_notam_pdf(pdf_path):
                 "body":          "\n".join(body_lines),
                 "win_start":     cur_win_s,
                 "win_end":       cur_win_e,
-                "daily_windows": _parse_daily_windows(body_lines) if not is_fir else [],
+                "daily_windows":  _parse_daily_windows(body_lines) if not is_fir else [],
+                "date_schedules": _parse_date_schedules(body_lines) if not is_fir else [],
             }
             if current_section == "ENROUTE" and current_fir:
                 fir_result[current_fir]["notams"].append(notam)
