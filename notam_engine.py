@@ -21,12 +21,14 @@ import json, math, os, re
 from datetime import datetime, timedelta, timezone
 import anthropic
 import pdfplumber
+import fir_coords as _fir_coords
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-NOTAM_PDF     = os.path.join(HERE, "Input", "TG921_NOTAM.pdf")
-AIRPORTS_JSON = os.path.join(HERE, "data", "airports.json")
-FIR_JSON      = os.path.join(HERE, "data", "fir_notams.json")
-ROUTE_JSON    = os.path.join(HERE, "data", "route.json")
+NOTAM_PDF         = os.path.join(HERE, "Input", "TG921_NOTAM.pdf")
+AIRPORTS_JSON     = os.path.join(HERE, "data", "airports.json")
+FIR_JSON          = os.path.join(HERE, "data", "fir_notams.json")
+ROUTE_JSON        = os.path.join(HERE, "data", "route.json")
+LEARNED_FIRS_JSON = os.path.join(HERE, "data", "fir_coords_learned.json")
 
 # ETD 1245Z + 20 min taxi = takeoff 1305Z on 20 JUN 2026
 TAKEOFF_UTC = datetime(2026, 6, 20, 13, 5, tzinfo=timezone.utc)
@@ -309,165 +311,25 @@ def _is_active(win_start, win_end, ref_dt):
 
 # ── FIR reference-time engine ─────────────────────────────────────────────────
 
-# Approximate FIR centroids (lat, lon) — used as haversine search targets only;
-# markers are placed on the nearest route waypoint, not at these coordinates.
-# Covers worldwide corridors relevant to Thai Airways operations.
-FIR_COORDS = {
-    # ── Europe ──────────────────────────────────────────────────────────────
-    "EBBU": (50.5,   4.5),  # Brussels UIR (Belgium)
-    "EDMM": (48.0,  12.5),  # Munich FIR (Germany S)
-    "EDGG": (50.5,   9.0),  # Langen FIR (Germany C)
-    "EDWW": (53.5,   9.5),  # Bremen FIR (Germany N)
-    "EDUU": (51.0,  10.0),  # Rhein UIR (Germany)
-    "EGPX": (57.0,  -4.0),  # Scottish FIR
-    "EGTT": (52.0,  -1.0),  # London FIR
-    "EHAA": (52.5,   5.5),  # Amsterdam FIR (Netherlands)
-    "EKDK": (55.5,  12.0),  # Copenhagen FIR (Denmark)
-    "ENOR": (65.0,  14.0),  # Oslo FIR (Norway)
-    "EPWW": (52.0,  19.0),  # Warsaw FIR (Poland)
-    "ESAA": (59.0,  16.0),  # Sweden FIR
-    "EYVL": (55.5,  24.0),  # Vilnius FIR (Lithuania)
-    "EERR": (57.0,  25.0),  # Riga FIR (Latvia)
-    "EETT": (59.5,  25.0),  # Tallinn FIR (Estonia)
-    "EFIN": (64.0,  27.0),  # Helsinki FIR (Finland)
-    "LAAA": (41.0,  20.0),  # Tirana FIR (Albania)
-    "LDZO": (45.5,  16.0),  # Zagreb FIR (Croatia)
-    "LECB": (41.0,   1.0),  # Barcelona FIR (Spain NE)
-    "LECM": (40.0,  -4.0),  # Madrid FIR (Spain)
-    "LFFF": (47.0,   2.0),  # Paris FIR (France)
-    "LFRR": (47.5,  -4.0),  # Brest Oceanic FIR
-    "LGGG": (37.5,  22.5),  # Athens FIR (Greece)
-    "LHCC": (47.0,  19.5),  # Budapest FIR (Hungary)
-    "LIMM": (45.0,  10.0),  # Milan FIR (Italy N)
-    "LIRR": (41.5,  12.5),  # Rome FIR (Italy S)
-    "LJLA": (46.0,  14.5),  # Ljubljana FIR (Slovenia)
-    "LKAA": (50.0,  15.0),  # Prague FIR (Czech Republic)
-    "LOVV": (47.5,  15.5),  # Vienna FIR (Austria)
-    "LPPC": (38.5,  -9.0),  # Lisbon FIR (Portugal)
-    "LRBB": (45.0,  24.5),  # Bucharest FIR (Romania)
-    "LSAS": (47.0,   8.5),  # Switzerland FIR
-    "LBSR": (42.5,  25.5),  # Sofia FIR (Bulgaria)
-    "LYBA": (44.0,  20.0),  # Belgrade FIR (Serbia)
-    "LWSS": (41.5,  21.5),  # Skopje FIR (North Macedonia)
-    "LCCC": (35.0,  33.0),  # Nicosia FIR (Cyprus)
-    "LZBB": (48.5,  19.0),  # Bratislava FIR (Slovakia)
-    "LTAA": (39.0,  37.0),  # Ankara FIR (Turkey E)
-    "LTBB": (41.0,  33.0),  # Istanbul FIR (Turkey W)
-    # ── North Atlantic ───────────────────────────────────────────────────────
-    "BIRD": (65.0, -18.0),  # Reykjavik Oceanic FIR
-    "EGGX": (54.0, -20.0),  # Shanwick Oceanic FIR
-    "LPPO": (39.0, -27.0),  # Santa Maria Oceanic FIR (Azores)
-    # ── Caucasus / Central Asia ─────────────────────────────────────────────
-    "UGGG": (42.0,  43.5),  # Tbilisi FIR (Georgia)
-    "UDDD": (40.0,  44.5),  # Yerevan FIR (Armenia)
-    "UBBA": (40.5,  49.0),  # Baku FIR (Azerbaijan)
-    "UTSS": (41.5,  64.0),  # Tashkent UIR (Uzbekistan)
-    "UTDD": (38.5,  68.5),  # Dushanbe FIR (Tajikistan)
-    "UTAK": (40.0,  53.5),  # Turkmenbashi FIR (Turkmenistan W)
-    "UTAA": (38.0,  58.0),  # Ashgabat FIR (Turkmenistan)
-    "UTAV": (38.5,  63.0),  # Turkmenabat FIR (Turkmenistan E)
-    "UCFM": (42.5,  74.5),  # Bishkek FIR (Kyrgyzstan)
-    "UAAA": (43.5,  77.0),  # Almaty FIR (Kazakhstan SE)
-    "UATT": (50.0,  57.0),  # Aktobe FIR (Kazakhstan W)
-    # ── Russia ──────────────────────────────────────────────────────────────
-    "ULLL": (60.0,  30.0),  # St Petersburg FIR
-    "UUWV": (55.8,  37.5),  # Moscow FIR
-    "URRR": (47.0,  40.0),  # Rostov FIR
-    "UWWW": (53.0,  50.0),  # Samara FIR
-    "USSS": (57.0,  60.5),  # Yekaterinburg FIR
-    "UNNT": (55.0,  82.5),  # Novosibirsk FIR
-    "UNKL": (56.0,  93.0),  # Krasnoyarsk FIR
-    "UIIX": (52.5, 104.0),  # Irkutsk FIR
-    "UHHH": (48.5, 135.0),  # Khabarovsk FIR
-    "UHWW": (43.0, 132.0),  # Vladivostok FIR
-    "UHPP": (53.0, 158.5),  # Petropavlovsk-Kamchatsky FIR
-    # ── Middle East ─────────────────────────────────────────────────────────
-    "OAKX": (34.5,  67.5),  # Kabul FIR (Afghanistan)
-    "OBBB": (26.0,  50.5),  # Bahrain FIR
-    "OEDF": (24.0,  45.0),  # Riyadh FIR (Saudi Arabia)
-    "OIIX": (35.0,  52.0),  # Tehran FIR (Iran)
-    "OJAC": (31.5,  36.5),  # Amman FIR (Jordan)
-    "OKAC": (29.0,  47.5),  # Kuwait FIR
-    "OLBB": (33.5,  35.5),  # Beirut FIR (Lebanon)
-    "OMAE": (24.5,  55.0),  # Emirates FIR (UAE)
-    "OOMM": (23.0,  58.0),  # Muscat FIR (Oman)
-    "ORBB": (33.0,  44.0),  # Baghdad FIR (Iraq)
-    "OSTT": (35.0,  38.0),  # Damascus FIR (Syria)
-    "OYSN": (15.5,  44.5),  # Sana'a FIR (Yemen)
-    "LLLL": (31.5,  34.5),  # Tel Aviv FIR (Israel)
-    # ── Africa ──────────────────────────────────────────────────────────────
-    "HECA": (26.5,  30.0),  # Cairo FIR (Egypt)
-    "HLLL": (27.0,  14.0),  # Tripoli FIR (Libya)
-    "DTTC": (33.5,   9.0),  # Tunis FIR (Tunisia)
-    "GMMM": (32.0,  -5.0),  # Casablanca FIR (Morocco)
-    "GOOO": (14.7, -17.5),  # Dakar FIR (Senegal)
-    "DIAP": ( 5.5,  -4.0),  # Abidjan FIR (Côte d'Ivoire)
-    "DNKK": (10.0,   8.0),  # Kano FIR (Nigeria)
-    "HSSS": (15.0,  32.0),  # Khartoum FIR (Sudan)
-    "HAAA": ( 9.0,  40.0),  # Addis Ababa FIR (Ethiopia)
-    "HKNA": ( 1.0,  38.0),  # Nairobi FIR (Kenya)
-    "FAJA": (-26.0, 28.0),  # Johannesburg FIR (South Africa)
-    # ── South Asia ──────────────────────────────────────────────────────────
-    "OPLR": (30.0,  72.0),  # Lahore FIR (Pakistan N)
-    "OPKR": (25.0,  67.0),  # Karachi FIR (Pakistan S)
-    "VIDF": (27.5,  79.0),  # Delhi FIR (India N)
-    "VABF": (19.0,  72.8),  # Mumbai FIR (India W)
-    "VANF": (21.0,  78.0),  # Nagpur FIR (India C)
-    "VECF": (23.0,  88.0),  # Kolkata FIR (India E)
-    "VOMF": (13.0,  80.0),  # Chennai FIR (India SE)
-    "VCCC": ( 7.5,  80.5),  # Colombo FIR (Sri Lanka)
-    "VGZR": (23.8,  90.4),  # Dhaka FIR (Bangladesh)
-    "VNKT": (28.0,  84.0),  # Kathmandu FIR (Nepal)
-    # ── Southeast Asia ──────────────────────────────────────────────────────
-    "VYYF": (19.5,  96.5),  # Yangon FIR (Myanmar)
-    "VTBB": (15.0, 100.5),  # Bangkok FIR (Thailand)
-    "VLVT": (17.5, 103.0),  # Vientiane FIR (Laos)
-    "VDPF": (12.5, 105.0),  # Phnom Penh FIR (Cambodia)
-    "VVHM": (11.5, 107.5),  # Ho Chi Minh FIR (Vietnam S)
-    "VVTS": (21.0, 105.8),  # Hanoi FIR (Vietnam N)
-    "WMFC": ( 4.0, 109.0),  # Kuala Lumpur FIR (Malaysia W)
-    "WBFC": ( 5.0, 115.5),  # Kota Kinabalu FIR (Malaysia E / Brunei)
-    "WSJC": ( 1.4, 104.0),  # Singapore FIR
-    "WAAF": (-6.5, 108.0),  # Jakarta FIR (Indonesia W)
-    "WIIF": (-2.5, 117.0),  # Ujung Pandang FIR (Indonesia E)
-    "RPHI": (13.0, 122.0),  # Manila FIR (Philippines)
-    "RPMM": (13.0, 132.0),  # Manila Oceanic FIR
-    # ── China ───────────────────────────────────────────────────────────────
-    "ZWUQ": (43.5,  87.5),  # Urumqi FIR (Xinjiang)
-    "ZLHW": (36.0, 103.5),  # Lanzhou FIR (Gansu / NW China)
-    "ZPKM": (25.0, 102.7),  # Kunming FIR (Yunnan)
-    "ZUUU": (30.0, 104.0),  # Chengdu FIR (Sichuan)
-    "ZHWH": (30.5, 114.0),  # Wuhan FIR (Hubei / central China)
-    "ZGZU": (23.5, 113.5),  # Guangzhou FIR (Guangdong / S China)
-    "ZSHA": (31.0, 118.0),  # Shanghai FIR (E China)
-    "ZBPE": (40.0, 116.5),  # Beijing FIR (N China)
-    "ZYSH": (41.5, 123.0),  # Shenyang FIR (NE China)
-    "VHHK": (22.3, 114.2),  # Hong Kong FIR
-    "RCAA": (25.0, 121.5),  # Taipei FIR (Taiwan)
-    # ── Northeast Asia ──────────────────────────────────────────────────────
-    "RKRR": (37.5, 127.5),  # Incheon FIR (South Korea)
-    "RJTG": (33.0, 131.0),  # Fukuoka FIR (Japan SW)
-    "RJJJ": (43.0, 141.0),  # Sapporo FIR (Japan N)
-    # ── Pacific Oceanic ─────────────────────────────────────────────────────
-    "KZAK": (35.0,-150.0),  # Oakland Oceanic FIR (N Pacific)
-    "NZZO": (-30.0,175.0),  # Auckland Oceanic FIR (NZ)
-    "NFFF": (-18.0,178.0),  # Nadi FIR (Fiji / SW Pacific)
-    "NTTT": (-22.0,-149.0), # Tahiti FIR (French Polynesia)
-    # ── Australia ───────────────────────────────────────────────────────────
-    "YBBB": (-23.0, 149.0), # Brisbane FIR (Australia E)
-    "YMMM": (-25.0, 134.0), # Melbourne FIR (Australia)
-    # ── Americas ────────────────────────────────────────────────────────────
-    "CZVR": (49.0,-123.0),  # Vancouver FIR (Canada BC)
-    "CZEG": (51.0,-114.0),  # Edmonton FIR (Canada Alberta)
-    "CZYZ": (44.0, -79.0),  # Toronto FIR (Canada E)
-    "CZUL": (45.5, -73.8),  # Montreal FIR (Canada QC)
-    "KZSE": (47.5,-122.3),  # Seattle ARTCC (USA NW)
-    "KZLA": (34.0,-118.0),  # Los Angeles ARTCC (USA W)
-    "KZOA": (37.5,-121.5),  # Oakland ARTCC (USA W coast)
-    "KZLC": (41.0,-112.0),  # Salt Lake City ARTCC (USA W)
-    "KZNY": (41.0, -74.0),  # New York ARTCC (USA NE)
-    "KZDC": (38.5, -77.0),  # Washington ARTCC (USA E)
-}
+
+def _load_learned_firs():
+    """Load user-accumulated FIR centroids from data/fir_coords_learned.json."""
+    if os.path.exists(LEARNED_FIRS_JSON):
+        with open(LEARNED_FIRS_JSON) as f:
+            return json.load(f)
+    return {}
+
+
+def _save_learned_fir(code, name, lat, lon):
+    """Persist a newly seen FIR centroid so future runs don't fall back to the midpoint."""
+    os.makedirs(os.path.dirname(LEARNED_FIRS_JSON), exist_ok=True)
+    learned = _load_learned_firs()
+    if code not in learned:
+        learned[code] = {"name": name, "lat": round(lat, 4), "lon": round(lon, 4),
+                         "source": "route_midpoint_fallback — verify and correct if needed"}
+        with open(LEARNED_FIRS_JSON, "w") as f:
+            json.dump(learned, f, indent=2)
+        print(f"  INFO: saved FIR {code} ({name}) to {LEARNED_FIRS_JSON} — please verify coordinates")
 
 
 def _haversine_nm(lat1, lon1, lat2, lon2):
@@ -743,11 +605,18 @@ def main():
     fir_out = []
     fir_ref_times = []
 
+    learned_firs = _load_learned_firs()
     for fir_icao, fir_data in fir_db.items():
-        coords = FIR_COORDS.get(fir_icao)
+        coords = _fir_coords.derive_fir_centroid(fir_icao)
         if coords is None:
-            print(f"  WARN: no centroid for FIR {fir_icao} ({fir_data['name']}) — skipping")
-            continue
+            entry = learned_firs.get(fir_icao)
+            if entry:
+                coords = (entry["lat"], entry["lon"])
+            else:
+                mid = route_pts[len(route_pts) // 2]
+                coords = (mid["lat"], mid["lon"])
+                _save_learned_fir(fir_icao, fir_data["name"], coords[0], coords[1])
+                print(f"  WARN: no centroid derived for FIR {fir_icao} ({fir_data['name']}) — using route midpoint")
 
         ref_dt, dist_nm, wp_lat, wp_lon = _nearest_waypoint(coords[0], coords[1], route_pts)
 

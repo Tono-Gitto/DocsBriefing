@@ -359,9 +359,32 @@ def _is_active_for_flight(win_start, win_end, flight_start, flight_end):
     return win_start <= flight_end and (win_end is None or win_end >= flight_start)
 
 
+def _fir_marker_position(centroid, route_pts, airports, threshold_nm=10.0):
+    """Return (lat, lon) for the FIR diamond marker.
+
+    Uses the nearest route waypoint to the FIR centroid, skipping any waypoint
+    within threshold_nm of an airport marker (to prevent diamond/circle overlap).
+    Falls back to the centroid itself if every waypoint is too close to an airport.
+    """
+    import notam_engine
+    ap_positions = [(ap["lat"], ap["lon"]) for ap in airports]
+    sorted_pts = sorted(
+        route_pts,
+        key=lambda p: notam_engine._haversine_nm(centroid[0], centroid[1], p["lat"], p["lon"]),
+    )
+    for pt in sorted_pts:
+        if not any(
+            notam_engine._haversine_nm(pt["lat"], pt["lon"], alat, alon) < threshold_nm
+            for alat, alon in ap_positions
+        ):
+            return pt["lat"], pt["lon"]
+    return centroid[0], centroid[1]  # all waypoints near airports — use centroid
+
+
 def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeoffs, leg_flight_infos):
     """Attach per-leg NOTAMs to airports; write airports.json, fir_notams.json, general_notams.json."""
     import notam_engine
+    import fir_coords as _fir_coords
 
     notam_db, fir_db, general_db = notam_engine.parse_notam_pdf(notam_path)
 
@@ -416,10 +439,10 @@ def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeo
             route_pts = json.load(f)
 
         for fir_icao, fir_data in fir_db.items():
-            coords = notam_engine.FIR_COORDS.get(fir_icao)
+            coords = _fir_coords.derive_fir_centroid(fir_icao)
             if not coords:
                 if leg_local == 1:
-                    _progress(f"  WARN: no centroid for FIR {fir_icao} ({fir_data['name']}) — skipped")
+                    _progress(f"  WARN: no centroid derived for FIR {fir_icao} ({fir_data['name']}) — skipped")
                 continue
             ref_dt, _, _, _ = notam_engine._nearest_waypoint(
                 coords[0], coords[1], route_pts
@@ -432,9 +455,10 @@ def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeo
             active_fir.sort(key=lambda x: x["tier"])
             leg_fir = {"leg": leg_local, "ref_time": ref_dt.strftime("%H%MZ"), "notams": active_fir}
             if fir_icao not in fir_merged:
+                mk_lat, mk_lon = _fir_marker_position(coords, route_pts, airports)
                 fir_merged[fir_icao] = {
                     "fir":  fir_icao, "name": fir_data["name"],
-                    "lat":  round(coords[0], 4), "lon": round(coords[1], 4),
+                    "lat":  round(mk_lat, 4), "lon": round(mk_lon, 4),
                     "legs": [leg_fir],
                 }
             else:
