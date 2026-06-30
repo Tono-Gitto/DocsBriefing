@@ -355,7 +355,6 @@ function buildChips(runway_info, allNotams) {
     const matchedIds = [];
 
     for (const n of (allNotams || [])) {
-      if (n.tier > 2) continue;
       const text = (n.summary || '') + ' ' + (n.body || '');
       let m; rwyRe.lastIndex = 0;
       let hit = false;
@@ -371,14 +370,12 @@ function buildChips(runway_info, allNotams) {
       }
       if (hit) {
         matchedIds.push(n.id);
-        if (bestTier === null || n.tier < bestTier) bestTier = n.tier;
+        if (n.tier <= 2 && (bestTier === null || n.tier < bestTier)) bestTier = n.tier;
       }
     }
 
     const tierAttr  = bestTier ? `data-tier="${bestTier}"` : '';
-    const clickAttr = matchedIds.length
-      ? `onclick='filterNotams(${JSON.stringify(matchedIds)},"${rwy}")'`
-      : '';
+    const clickAttr = `onclick='filterNotams(${JSON.stringify(matchedIds)},"${rwy}")'`;
     return `<span class="rwy-chip" ${tierAttr} ${clickAttr}><span class="rwy-name">${rwy}</span><span class="rwy-len">${len}m</span></span>`;
   }).join('');
 }
