@@ -382,7 +382,7 @@ function navigateTo(idx) {
   map.flyTo([data.lat, data.lon], Math.max(map.getZoom(), 7));
 }
 
-function openPanel(data, type) {
+function openPanel(data, type = 'airport') {
   clearNotamFilter();
   const c = document.getElementById("panel-content");
   c.innerHTML = type === "fir" ? buildFirPanel(data) : buildPanel(data);
@@ -390,7 +390,7 @@ function openPanel(data, type) {
   map.invalidateSize();
   const list = _navList();
   const key  = type === 'fir' ? data.fir : data.icao;
-  _navIndex  = list.findIndex(e => (e.type === 'fir' ? e.data.fir : e.data.icao) === key);
+  _navIndex  = list.findIndex(e => e.type === type && (e.type === 'fir' ? e.data.fir : e.data.icao) === key);
   _updateNavBar();
 }
 
