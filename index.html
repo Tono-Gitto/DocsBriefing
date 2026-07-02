@@ -930,10 +930,7 @@ Promise.all([
   legs.forEach(l => {
     if (l.dep)  depSet.add(l.dep);
     if (l.dest) destSet.add(l.dest);
-    (l.dest_altn || []).forEach(ic => altnSet.add(ic));
-    (l.era       || []).forEach(ic => altnSet.add(ic));
-    if (l.rcf_dest) altnSet.add(l.rcf_dest);
-    (l.rcf_altn  || []).forEach(ic => altnSet.add(ic));
+    if (l.dest_altn && l.dest_altn[0]) altnSet.add(l.dest_altn[0]);
   });
 
   // Header: show all legs
