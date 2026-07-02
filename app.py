@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 
 import pdfplumber
 from dotenv import load_dotenv
+from _utils import HAIKU_MODEL
 from flask import (
     Flask, Response, redirect, render_template_string, request,
     send_file, send_from_directory,
@@ -45,7 +46,11 @@ RUNS_DIR   = os.path.join(HERE, "runs")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(RUNS_DIR,   exist_ok=True)
 
-app = Flask(__name__, static_folder=None)
+_DEFAULT_TAXI_MIN    = 20    # fallback when OFP TAXI line is absent; shifts all ref_times if wrong
+_FIR_FLIGHT_WINDOW_H = 24   # FIR NOTAMs checked this many hours past the last leg takeoff
+_FIR_EXCLUSION_NM    = 10.0 # FIR diamond placed outside this radius of any airport
+
+app = Flask(__name__, static_folder="static")
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB upload cap
 
 _lock = threading.Lock()
@@ -81,18 +86,22 @@ _RCF_ALTN_RE     = re.compile(r"ROUTE TO SECONDARY DESTINATION ALTERNATE\s+([A-Z
 _RCF_DEST_RE     = re.compile(r"ROUTE TO SECONDARY DESTINATION\s+([A-Z]{4})/")
 
 
-def _extract_alternates(ofp_path):
+def _read_ofp(ofp_path):
+    """Open OFP PDF once; return (page1_text: str, all_lines: list[str])."""
+    with pdfplumber.open(ofp_path) as pdf:
+        page1_text = pdf.pages[0].extract_text() or ""
+        all_lines = []
+        for page in pdf.pages:
+            all_lines.extend((page.extract_text() or "").splitlines())
+    return page1_text, all_lines
+
+
+def _extract_alternates(all_lines):
     """
-    Parse alternate airport lists from the OFP PDF.
+    Parse alternate airport lists from pre-extracted OFP lines.
     Returns dict: {dest_altn: [...], era: [...], rcf_dest: str|None, rcf_altn: [...]}.
     All lists contain 4-letter ICAO codes. Empty when the section is absent.
     """
-    lines = []
-    with pdfplumber.open(ofp_path) as pdf:
-        for page in pdf.pages:
-            t = page.extract_text() or ""
-            lines.extend(t.splitlines())
-
     dest_altn = []
     era       = []
     rcf_dest  = None
@@ -100,7 +109,7 @@ def _extract_alternates(ofp_path):
     seen_altn = set()
 
     in_altn_table = False
-    for line in lines:
+    for line in all_lines:
         stripped = line.strip()
 
         if _ALTN_ROUTE_HDR.search(stripped):
@@ -145,14 +154,12 @@ def _extract_alternates(ofp_path):
     return {"dest_altn": dest_altn, "era": era, "rcf_dest": rcf_dest, "rcf_altn": rcf_altn}
 
 
-def _extract_ofp_constants(ofp_path):
+def _extract_ofp_constants(page1_text):
     """
-    Read OFP page 1. Returns (etd_utc: datetime, taxi_min: int, flight_time_min: int).
+    Parse OFP page-1 text. Returns (etd_utc: datetime, taxi_min: int, flight_time_min: int).
     Raises ValueError if essential fields (date, ETD, FLT) are missing.
     """
-    with pdfplumber.open(ofp_path) as pdf:
-        text = pdf.pages[0].extract_text() or ""
-
+    text = page1_text
     dm = _DATE_RE.search(text)
     if not dm:
         raise ValueError("Cannot find flight date (DDMMMYY) in OFP page 1")
@@ -168,7 +175,11 @@ def _extract_ofp_constants(ofp_path):
     etd_utc = datetime(year, mon, day, int(em.group(1)), int(em.group(2)), tzinfo=timezone.utc)
 
     tm = _TAXI_RE.search(text)
-    taxi_min = int(tm.group(1)) * 60 + int(tm.group(2)) if tm else 20  # default 20 min
+    if tm:
+        taxi_min = int(tm.group(1)) * 60 + int(tm.group(2))
+    else:
+        taxi_min = _DEFAULT_TAXI_MIN
+        print(f"  WARN: TAXI line missing in OFP — using default {_DEFAULT_TAXI_MIN} min (shifts all ref_times)")
 
     fm = _FLT_RE.search(text)
     if not fm:
@@ -178,13 +189,12 @@ def _extract_ofp_constants(ofp_path):
     return etd_utc, taxi_min, flight_time_min
 
 
-def _extract_flight_info(ofp_path, etd_utc, takeoff_utc, flight_time_min):
+def _extract_flight_info(page1_text, all_lines, etd_utc, takeoff_utc, flight_time_min):
     """
-    Read OFP page 1. Returns a dict for flight_info.json:
+    Parse pre-extracted OFP text. Returns a dict for flight_info.json:
       {flight, dep, dest, date, acft, reg, etd, eta}
     """
-    with pdfplumber.open(ofp_path) as pdf:
-        text = pdf.pages[0].extract_text() or ""
+    text = page1_text
 
     # ETA = touchdown: takeoff (ETD + parsed taxi-out) + airborne time
     eta_utc = takeoff_utc + timedelta(minutes=flight_time_min)
@@ -195,7 +205,7 @@ def _extract_flight_info(ofp_path, etd_utc, takeoff_utc, flight_time_min):
     reg    = _REG_RE.search(text)
     dm     = _DATE_RE.search(text)
 
-    alts = _extract_alternates(ofp_path)
+    alts = _extract_alternates(all_lines)
     return {
         "flight":    "TG" + flight.group(1) if flight else "TG???",
         "dep":       dep.group(1)  if dep  else "",
@@ -215,10 +225,11 @@ def _extract_flight_info(ofp_path, etd_utc, takeoff_utc, flight_time_min):
 # ── NOTAM window formatter ────────────────────────────────────────────────────
 
 def _fmt_win(n):
+    def _fdt(dt): return f"{dt.day} {dt:%b %Y %H:%M}Z"
     if n.get("win_start"):
-        start = n["win_start"].strftime("%-d %b %Y %H:%MZ")
+        start = _fdt(n["win_start"])
         if n.get("win_end"):
-            return start + " – " + n["win_end"].strftime("%-d %b %Y %H:%MZ")
+            return start + " – " + _fdt(n["win_end"])
         return "from " + start  # open-ended window
     import notam_engine
     return notam_engine._fmt_daily_windows(n.get("daily_windows"))
@@ -314,7 +325,7 @@ def _filter_general_notams(general_db, fir_db, leg_flight_infos):
             verdict_map = {}
             try:
                 msg = client.messages.create(
-                    model="claude-haiku-4-5-20251001",
+                    model=HAIKU_MODEL,
                     max_tokens=1024,
                     system=filter_system,
                     messages=[{"role": "user", "content": user_msg}],
@@ -384,22 +395,22 @@ def _is_active_for_flight(win_start, win_end, flight_start, flight_end):
     return win_start <= flight_end and (win_end is None or win_end >= flight_start)
 
 
-def _fir_marker_position(centroid, route_pts, airports, threshold_nm=10.0):
+def _fir_marker_position(centroid, route_pts, airports, threshold_nm=_FIR_EXCLUSION_NM):
     """Return (lat, lon) for the FIR diamond marker.
 
     Uses the nearest route waypoint to the FIR centroid, skipping any waypoint
     within threshold_nm of an airport marker (to prevent diamond/circle overlap).
     Falls back to the centroid itself if every waypoint is too close to an airport.
     """
-    import notam_engine
+    from _utils import haversine_nm as _hav
     ap_positions = [(ap["lat"], ap["lon"]) for ap in airports]
     sorted_pts = sorted(
         route_pts,
-        key=lambda p: notam_engine._haversine_nm(centroid[0], centroid[1], p["lat"], p["lon"]),
+        key=lambda p: _hav(centroid[0], centroid[1], p["lat"], p["lon"]),
     )
     for pt in sorted_pts:
         if not any(
-            notam_engine._haversine_nm(pt["lat"], pt["lon"], alat, alon) < threshold_nm
+            _hav(pt["lat"], pt["lon"], alat, alon) < threshold_nm
             for alat, alon in ap_positions
         ):
             return pt["lat"], pt["lon"]
@@ -446,7 +457,7 @@ def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeo
 
     # ── FIR NOTAMs per leg ────────────────────────────────────────────────────
     flight_start = min(leg_takeoffs)
-    flight_end   = max(leg_takeoffs) + timedelta(hours=24)
+    flight_end   = max(leg_takeoffs) + timedelta(hours=_FIR_FLIGHT_WINDOW_H)
 
     fir_merged = {}
     for leg_local, (route_json_path, takeoff_utc) in enumerate(
@@ -539,9 +550,10 @@ def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
             leg_data = []
             for local_idx, ofp_path in enumerate(group_ofps, start=1):
                 _progress(f"[G{g_num}/L{local_idx}] Reading OFP…")
-                etd_utc, taxi_min, flt_min = _extract_ofp_constants(ofp_path)
+                page1_text, all_lines = _read_ofp(ofp_path)
+                etd_utc, taxi_min, flt_min = _extract_ofp_constants(page1_text)
                 takeoff_utc = etd_utc + timedelta(minutes=taxi_min)
-                fi = _extract_flight_info(ofp_path, etd_utc, takeoff_utc, flt_min)
+                fi = _extract_flight_info(page1_text, all_lines, etd_utc, takeoff_utc, flt_min)
                 _progress(
                     f"  {fi['flight']} {fi['dep']}→{fi['dest']}  "
                     f"ETD {fi['etd']}  TAKEOFF {takeoff_utc.strftime('%H%MZ')}"
@@ -610,7 +622,7 @@ def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
 
     except Exception as exc:
         import traceback
-        _progress(f"ERROR: {exc}")
+        _progress(f"ERROR: {type(exc).__name__}: {exc.args[0] if exc.args else '(no detail)'}")
         with _lock:
             _current_run["status"] = "error"
             _current_run["error"]  = str(exc)
@@ -781,6 +793,7 @@ _PROGRESS_HTML = """<!doctype html>
     const runId     = {{ run_id | tojson }};
     const groupCount = {{ group_count | tojson }};
     let seen = 0;
+    let pollErrors = 0;
     const log = document.getElementById("log");
 
     function addLine(text, cls) {
@@ -794,6 +807,7 @@ _PROGRESS_HTML = """<!doctype html>
     function poll() {
       fetch("/api/status/" + runId)
         .then(r => {
+          pollErrors = 0;
           if (r.status === 404) {
             clearInterval(timer);
             addLine("This run is no longer active (superseded or server restarted).", "err");
@@ -820,7 +834,14 @@ _PROGRESS_HTML = """<!doctype html>
             addLine("Pipeline failed — check server logs.", "err");
           }
         })
-        .catch(e => addLine("Poll error: " + e, "err"));
+        .catch(e => {
+          pollErrors++;
+          addLine("Poll error: " + e, "err");
+          if (pollErrors >= 5) {
+            clearInterval(timer);
+            addLine("Polling stopped after repeated network errors.", "err");
+          }
+        });
     }
 
     const timer = setInterval(poll, 2000);

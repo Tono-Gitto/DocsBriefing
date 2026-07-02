@@ -16,8 +16,14 @@ def _download():
     print(f"Saved to {RAW_CSV}")
 
 
+_coords_cache = None
+
+
 def load_coords(csv_path=RAW_CSV) -> dict:
     """Return {icao: (lat_float, lon_float)} for every airport in the CSV."""
+    global _coords_cache
+    if _coords_cache is not None:
+        return _coords_cache
     if not os.path.exists(csv_path):
         _download()
     coords = {}
@@ -31,4 +37,5 @@ def load_coords(csv_path=RAW_CSV) -> dict:
                 continue
             if icao:
                 coords[icao] = (lat, lon)
-    return coords
+    _coords_cache = coords
+    return _coords_cache

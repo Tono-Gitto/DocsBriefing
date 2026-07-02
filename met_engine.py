@@ -7,10 +7,10 @@ Per airport:
   - Reference time = TAKEOFF + ACCT of nearest route waypoint (haversine)
 """
 
-import json, math, os, re
+import json, os, re
 from datetime import datetime, timedelta, timezone
-import pdfplumber
 from airport_coords import load_coords
+from _utils import haversine_nm, clean_pdf_lines
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MET_PDF   = os.path.join(HERE, "Input", "TG921_MET.pdf")
@@ -31,19 +31,9 @@ _PAGE_HDR_RE = re.compile(
     r"^(\$B|Dispatch MET|_{5,}|\d{2}[A-Z]{3}\d{2}\s+THA\d+|TG\d+\s+\d{2}[A-Z]{3})"
 )
 
-def _clean_lines(pdf_path):
-    lines = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                lines.extend(text.split("\n"))
-    return [l.strip() for l in lines if l.strip() and not _PAGE_HDR_RE.match(l.strip())]
-
-
 def parse_met_pdf(pdf_path):
     """Return ({icao: {iata, name, metar, taf_raw}}, [ordered icao list])."""
-    clean = _clean_lines(pdf_path)
+    clean = clean_pdf_lines(pdf_path, _PAGE_HDR_RE)
     airports = {}
     order = []
     current = None
@@ -123,20 +113,11 @@ def parse_met_pdf(pdf_path):
 
 # ── Reference-time engine ────────────────────────────────────────────────────
 
-def _haversine_nm(lat1, lon1, lat2, lon2):
-    R = 3440.065
-    φ1, φ2 = math.radians(lat1), math.radians(lat2)
-    a = (math.sin(math.radians(lat2 - lat1) / 2) ** 2
-         + math.cos(φ1) * math.cos(φ2)
-         * math.sin(math.radians(lon2 - lon1) / 2) ** 2)
-    return R * 2 * math.asin(math.sqrt(a))
-
-
 def compute_ref_time(lat, lon, route_pts):
     """Return (ref_datetime_utc, dist_nm) via nearest-waypoint haversine."""
     best_dist, best_acct = float("inf"), 0
     for pt in route_pts:
-        d = _haversine_nm(lat, lon, pt["lat"], pt["lon"])
+        d = haversine_nm(lat, lon, pt["lat"], pt["lon"])
         if d < best_dist:
             best_dist, best_acct = d, pt["acct_min"]
     return TAKEOFF_UTC + timedelta(minutes=best_acct), best_dist

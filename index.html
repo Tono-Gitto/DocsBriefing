@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Preflight Briefing</title>
 
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="/static/leaflet.css" />
+  <script src="/static/leaflet.js"></script>
 
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -482,9 +482,8 @@ function filterNotams(ids, rwy) {
     chip.classList.toggle('rwy-chip-dimmed', !!chip.dataset.tier && chipRwy !== rwy);
   });
 
-  const panel = document.getElementById('panel');
   const first = [...document.querySelectorAll('.notam-row')].find(r => idSet.has(r.dataset.notamId));
-  if (first) panel.scrollTop = first.offsetTop - 80;
+  if (first) document.getElementById('panel-content').scrollTop = first.offsetTop - 80;
 }
 
 function clearNotamFilter() {
@@ -536,40 +535,23 @@ function badgeClass(type) {
   return "badge-becmg";
 }
 
-// ── notamRow: unique DOM id per (leg, notam); data-notam-id for filter ──────
-function notamRow(n, legNum) {
+// ── notamRow: renders a NOTAM row. legInfo is a number for single-leg rows
+//   (DOM id: notam-l<N>-<safeId>) or an array/null for unified multi-leg rows
+//   (DOM id: notam-u-<safeId>, with optional per-leg chips).
+function notamRow(n, legInfo) {
+  const unified  = Array.isArray(legInfo);
   const tierClass = n.tier === 1 ? "badge-t1" : n.tier === 2 ? "badge-t2" : "badge-t3";
   const tierLabel = n.tier === 1 ? "T1" : n.tier === 2 ? "T2" : "T3";
   const win    = compactWindow(n.window);
   const safeId = n.id.replace(/[^a-zA-Z0-9]/g, '_');
-  const domId  = `notam-l${legNum}-${safeId}`;
-  const shown   = n.summary || n.body;
-  const canExp  = n.summary && n.body && n.summary !== n.body;
-  if (canExp) _notamBody[safeId] = n.body;
-  let row = `<div class="notam-row" id="${domId}" data-notam-id="${safeId}">
-    <div class="notam-header">
-      <span class="badge ${tierClass}">${tierLabel}</span>
-      <span class="notam-id">${esc(n.id)}</span>`;
-  if (win) row += `<span class="notam-window">${esc(win)}</span>`;
-  row += `</div><div class="notam-body${canExp ? ' notam-clickable' : ''}"${
-    canExp ? ` onclick="toggleNotam(this,'${safeId}')"` : ''
-  }>${esc(shown)}</div></div>`;
-  return row;
-}
-
-// ── notamRowUnified: single NOTAM row for the unified multi-leg NOTAM block ──
-function notamRowUnified(n, legNums) {
-  const tierClass = n.tier === 1 ? "badge-t1" : n.tier === 2 ? "badge-t2" : "badge-t3";
-  const tierLabel = n.tier === 1 ? "T1" : n.tier === 2 ? "T2" : "T3";
-  const win    = compactWindow(n.window);
-  const safeId = n.id.replace(/[^a-zA-Z0-9]/g, '_');
-  const chips  = legNums
-    ? legNums.map(num => `<span class="leg-chip${num === 2 ? ' leg2' : ''}">L${num}</span>`).join('')
+  const domId  = unified ? `notam-u-${safeId}` : `notam-l${legInfo}-${safeId}`;
+  const chips  = unified && legInfo
+    ? legInfo.map(num => `<span class="leg-chip${num === 2 ? ' leg2' : ''}">L${num}</span>`).join('')
     : '';
   const shown  = n.summary || n.body;
   const canExp = n.summary && n.body && n.summary !== n.body;
   if (canExp) _notamBody[safeId] = n.body;
-  let row = `<div class="notam-row" id="notam-u-${safeId}" data-notam-id="${safeId}">
+  let row = `<div class="notam-row" id="${domId}" data-notam-id="${safeId}">
     <div class="notam-header">
       <span class="badge ${tierClass}">${tierLabel}</span>${chips}
       <span class="notam-id">${esc(n.id)}</span>`;
@@ -680,7 +662,7 @@ function buildPanel(ap) {
       html += `<div class="no-data">No active NOTAMs at either ref time</div>`;
     } else {
       unified.forEach(({ notam: n, legNums }) => {
-        html += notamRowUnified(n, legNums.length < legs.length ? legNums : null);
+        html += notamRow(n, legNums.length < legs.length ? legNums : null);
       });
     }
     // Per-leg notes for empty / not-in-brief
@@ -733,11 +715,11 @@ function buildFirPanel(f) {
     const t3   = unified.filter(u => u.notam.tier === 3);
 
     t1t2.forEach(({ notam: n, legNums }) => {
-      html += notamRowUnified(n, legNums.length < legs.length ? legNums : null);
+      html += notamRow(n, legNums.length < legs.length ? legNums : null);
     });
 
     t3.forEach(({ notam: n, legNums }) => {
-      html += notamRowUnified(n, legNums.length < legs.length ? legNums : null);
+      html += notamRow(n, legNums.length < legs.length ? legNums : null);
     });
 
     legs.forEach(leg => {
@@ -774,6 +756,8 @@ function buildFirNotamSection(leg) {
 function openFlightPanel() {
   document.getElementById('panel-content').innerHTML = buildFlightPanel(_generalNotams);
   document.body.classList.add('panel-open');
+  _navIndex = -1;
+  _updateNavBar();
 }
 
 function buildFlightPanel(sections) {
@@ -928,8 +912,8 @@ function renderHeaderAirportBtns(airports, legs) {
 
 // ── Main data loading ──────────────────────────────────────────────────────
 Promise.all([
-  fetch(DATA("flight_info.json")).then(r => r.json()).catch(() => ({})),
-  fetch(DATA("airports.json")).then(r => r.json()),
+  fetch(DATA("flight_info.json")).then(r => r.ok ? r.json() : {}).catch(() => ({})),
+  fetch(DATA("airports.json")).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
 ]).then(([fi, airports]) => {
   // Support legacy flat format (dep/dest as direct strings)
   const legs = fi.legs || (fi.dep ? [{leg:1, dep:fi.dep, dest:fi.dest,
@@ -999,16 +983,17 @@ Promise.all([
 
 // ── General / flight-wide NOTAMs ──────────────────────────────────────────
 fetch(DATA("general_notams.json"))
-  .then(r => r.json())
+  .then(r => r.ok ? r.json() : null)
   .then(sections => {
+    if (!sections) return;  // absent on legacy / MVP runs — silently ignore
     _generalNotams = sections;
     _updateFlightBadge(sections);
   })
-  .catch(() => {});  // absent on legacy / MVP runs — silently ignore
+  .catch(() => {});
 
 // ── FIR markers ───────────────────────────────────────────────────────────
 fetch(DATA("fir_notams.json"))
-  .then(r => r.json())
+  .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
   .then(firs => {
     _navFirs = [];
     firs.forEach(f => {

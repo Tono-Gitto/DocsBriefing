@@ -17,11 +17,11 @@ Attribution: airport is determined by section header (ICAO / IATA) not NOTAM ID 
 Run AFTER met_engine.py so airports.json already has weather + ref_time fields.
 """
 
-import json, math, os, re
+import json, os, re
 from datetime import datetime, timedelta, timezone
 import anthropic
-import pdfplumber
 import fir_coords as _fir_coords
+from _utils import haversine_nm, clean_pdf_lines, HAIKU_MODEL
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 NOTAM_PDF         = os.path.join(HERE, "Input", "TG921_NOTAM.pdf")
@@ -39,16 +39,6 @@ _PAGE_HDR_RE = re.compile(
     r"^(Official Pilot Briefing|Trans ID:|Creation Time:|"
     r"THA\d{3}\s+\d{2}[A-Z]{3}\d{2}\s+[A-Z]+\s+[A-Z0-9]+)"
 )
-
-def _get_clean_lines(pdf_path):
-    lines = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                lines.extend(text.split("\n"))
-    return [l.strip() for l in lines if l.strip() and not _PAGE_HDR_RE.match(l.strip())]
-
 
 # ── Pattern constants ─────────────────────────────────────────────────────────
 
@@ -371,21 +361,12 @@ def resolve_fir_centroid(fir_code, fir_name, route_pts):
     return coords, "route_midpoint"
 
 
-def _haversine_nm(lat1, lon1, lat2, lon2):
-    R = 3440.065
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    a = (math.sin(math.radians(lat2 - lat1) / 2) ** 2
-         + math.cos(phi1) * math.cos(phi2)
-         * math.sin(math.radians(lon2 - lon1) / 2) ** 2)
-    return R * 2 * math.asin(math.sqrt(a))
-
-
 def _nearest_waypoint(lat, lon, route_pts):
     """Return (ref_dt, dist_nm, wp_lat, wp_lon) via haversine nearest-waypoint search."""
     best_dist = float("inf")
     best_acct, best_lat, best_lon = 0, lat, lon
     for pt in route_pts:
-        d = _haversine_nm(lat, lon, pt["lat"], pt["lon"])
+        d = haversine_nm(lat, lon, pt["lat"], pt["lon"])
         if d < best_dist:
             best_dist = d
             best_acct = pt["acct_min"]
@@ -407,7 +388,7 @@ def parse_notam_pdf(pdf_path):
 
     Each notam_dict: {id, tier, body, win_start, win_end, daily_windows}
     """
-    clean = _get_clean_lines(pdf_path)
+    clean = clean_pdf_lines(pdf_path, _PAGE_HDR_RE)
     result         = {}
     fir_result     = {}
     general_result = {"GENERAL": [], "FLIGHT LEG": [], "AEROPLANE": []}
@@ -419,11 +400,10 @@ def parse_notam_pdf(pdf_path):
     cur_body      = []
     cur_win_s     = None
     cur_win_e     = None
-    cur_is_ci     = False
     cur_see_attch = False
 
     def flush():
-        nonlocal cur_id, cur_body, cur_win_s, cur_win_e, cur_is_ci, cur_see_attch
+        nonlocal cur_id, cur_body, cur_win_s, cur_win_e, cur_see_attch
         if cur_id and not cur_see_attch:
             body_lines = [l for l in cur_body if l]
             is_fir = current_section == "ENROUTE"
@@ -447,7 +427,6 @@ def parse_notam_pdf(pdf_path):
         cur_body      = []
         cur_win_s     = None
         cur_win_e     = None
-        cur_is_ci     = False
         cur_see_attch = False
 
     expecting_window = False
@@ -558,7 +537,7 @@ def _call_summarize_batch(client, items):
     for attempt in range(_API_RETRIES):
         try:
             msg = client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model=HAIKU_MODEL,
                 max_tokens=1024,
                 system=_SUMMARIZE_SYSTEM,
                 messages=[{"role": "user", "content": "\n\n".join(lines)}],
@@ -640,9 +619,9 @@ def main():
                 "tier": _effective_tier(n, ref_dt),
                 "body": n["body"],
                 "window": (
-                    n["win_start"].strftime("%-d %b %Y %H:%MZ")
+                    f"{n['win_start'].day} {n['win_start']:%b %Y %H:%M}Z"
                     + " – "
-                    + n["win_end"].strftime("%-d %b %Y %H:%MZ")
+                    + f"{n['win_end'].day} {n['win_end']:%b %Y %H:%M}Z"
                 ) if n["win_start"] else _fmt_daily_windows(n.get("daily_windows")),
             }
             for n in notams_raw
@@ -681,9 +660,9 @@ def main():
                 "tier": n["tier"],
                 "body": n["body"],
                 "window": (
-                    n["win_start"].strftime("%-d %b %Y %H:%MZ")
+                    f"{n['win_start'].day} {n['win_start']:%b %Y %H:%M}Z"
                     + " – "
-                    + n["win_end"].strftime("%-d %b %Y %H:%MZ")
+                    + f"{n['win_end'].day} {n['win_end']:%b %Y %H:%M}Z"
                 ) if n["win_start"] else None,
             }
             for n in fir_data["notams"]
