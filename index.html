@@ -41,13 +41,44 @@
       width: 380px;
       background: #12132a;
       border-left: 1px solid #2a2d50;
-      overflow-y: auto;
-      overscroll-behavior: contain;
       transition: right 0.25s ease;
       z-index: 900;
       display: flex; flex-direction: column;
     }
     body.panel-open #panel { right: 0; }
+    #panel-content {
+      flex: 1;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+    #panel-nav {
+      flex-shrink: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 10px;
+      border-top: 1px solid #1e2248;
+      background: #12132a;
+      min-height: 50px;
+    }
+    .nav-btn {
+      background: #1a1d3a;
+      border: 1px solid #2a2d50;
+      border-radius: 7px;
+      color: #a0c8ff;
+      font-size: 0.82rem;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      padding: 7px 13px;
+      cursor: pointer;
+      touch-action: manipulation;
+      max-width: 155px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .nav-btn:hover  { background: #22254a; border-color: #404880; }
+    .nav-btn:active { background: #2a2e58; }
 
     /* 44×44 touch target for close button */
     .panel-close {
@@ -296,6 +327,7 @@
 <div id="panel">
   <div class="panel-close" onclick="closePanel()">✕</div>
   <div id="panel-content"></div>
+  <div id="panel-nav"></div>
 </div>
 
 <div id="status">Loading…</div>
@@ -308,6 +340,9 @@ const DATA  = f => `/data/${GROUP}/${f}`;
 const ROUTE_COLORS = ["#5b9ef4", "#f4a15b"];  // leg 1 = blue, leg 2 = orange
 
 let _activeRwyFilter = null;
+let _navAirports = [];
+let _navFirs     = [];
+let _navIndex    = -1;
 
 const map = L.map("map", { center: [30, 60], zoom: 3 });
 
@@ -317,12 +352,46 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
 }).addTo(map);
 
 // ── Panel ──────────────────────────────────────────────────────────────────
+function _navList() {
+  return [
+    ..._navAirports.map(a => ({ data: a, type: 'airport' })),
+    ..._navFirs.map(f    => ({ data: f, type: 'fir' })),
+  ];
+}
+
+function _updateNavBar() {
+  const nav = document.getElementById("panel-nav");
+  if (!nav) return;
+  const list = _navList();
+  if (_navIndex < 0 || !list.length) { nav.innerHTML = ''; return; }
+
+  const prev = _navIndex > 0               ? list[_navIndex - 1] : null;
+  const next = _navIndex < list.length - 1 ? list[_navIndex + 1] : null;
+  const label = e => e.type === 'fir' ? e.data.fir : e.data.icao;
+
+  nav.innerHTML =
+    (prev ? `<button class="nav-btn nav-prev" onclick="navigateTo(${_navIndex-1})">← ${label(prev)}</button>` : '<span></span>') +
+    (next ? `<button class="nav-btn nav-next" onclick="navigateTo(${_navIndex+1})">${label(next)} →</button>` : '<span></span>');
+}
+
+function navigateTo(idx) {
+  const list = _navList();
+  if (idx < 0 || idx >= list.length) return;
+  const { data, type } = list[idx];
+  openPanel(data, type);
+  map.flyTo([data.lat, data.lon], Math.max(map.getZoom(), 7));
+}
+
 function openPanel(data, type) {
   clearNotamFilter();
   const c = document.getElementById("panel-content");
   c.innerHTML = type === "fir" ? buildFirPanel(data) : buildPanel(data);
   document.body.classList.add("panel-open");
   map.invalidateSize();
+  const list = _navList();
+  const key  = type === 'fir' ? data.fir : data.icao;
+  _navIndex  = list.findIndex(e => (e.type === 'fir' ? e.data.fir : e.data.icao) === key);
+  _updateNavBar();
 }
 
 function expandT3(uid, btn) {
@@ -330,6 +399,7 @@ function expandT3(uid, btn) {
   btn.style.display = "none";
 }
 function closePanel() {
+  _navIndex = -1;
   document.body.classList.remove("panel-open");
   map.invalidateSize();
 }
@@ -900,6 +970,8 @@ Promise.all([
         : `Route: ${totalWpts} waypoints`;
   });
 
+  _navAirports = airports;
+
   // Airport markers
   airports.forEach(ap => {
     const color  = markerColor(ap.icao);
@@ -933,12 +1005,14 @@ fetch(DATA("general_notams.json"))
 fetch(DATA("fir_notams.json"))
   .then(r => r.json())
   .then(firs => {
+    _navFirs = [];
     firs.forEach(f => {
       // Support both new `legs` schema and legacy flat schema
       const legs = f.legs || [{leg:1, ref_time:f.ref_time, notams:f.notams||[]}];
       const allFirNotams = legs.flatMap(l => l.notams || []);
       if (!allFirNotams.length) return;
 
+      _navFirs.push(f);
       const color = allFirNotams.some(n => n.tier <= 2) ? "#c8a800" : "#1a1a2e";
       const tip   = `${f.fir} — ${f.name} (${allFirNotams.length})`;
       L.marker([f.lat, f.lon], { icon: firIcon(color), zIndexOffset: 50 })
