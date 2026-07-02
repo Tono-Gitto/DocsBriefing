@@ -536,6 +536,11 @@ def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
                     "flight_info": fi,
                 })
 
+            # Sort legs chronologically so leg 1 = earliest departure
+            leg_data.sort(key=lambda ld: ld["takeoff_utc"])
+            for new_idx, ld in enumerate(leg_data, start=1):
+                ld["local_idx"] = new_idx
+
             # ── Step 2: Parse routes ──────────────────────────────────────────
             import parse_ofp
             for ld in leg_data:
