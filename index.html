@@ -406,7 +406,8 @@ function closePanel() {
 
 function esc(s) {
   if (!s) return "";
-  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+          .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 }
 
 // ── Runway chips (built from union of notams across all legs) ───────────────
@@ -444,11 +445,18 @@ function buildChips(runway_info, allNotams) {
       }
     }
 
-    const tierAttr  = bestTier ? `data-tier="${bestTier}"` : '';
-    const clickAttr = `onclick='filterNotams(${JSON.stringify(matchedIds)},"${rwy}")'`;
-    return `<span class="rwy-chip" ${tierAttr} ${clickAttr}><span class="rwy-name">${rwy}</span><span class="rwy-len">${len}m</span></span>`;
+    const tierAttr = bestTier ? `data-tier="${bestTier}"` : '';
+    // NOTAM IDs come from third-party PDFs — pass them via data attributes,
+    // never interpolated into inline JS
+    return `<span class="rwy-chip" ${tierAttr} data-rwy="${rwy}" data-ids="${esc(matchedIds.join('|'))}"><span class="rwy-name">${rwy}</span><span class="rwy-len">${len}m</span></span>`;
   }).join('');
 }
+
+document.addEventListener('click', e => {
+  const chip = e.target.closest('.rwy-chip[data-rwy]');
+  if (!chip) return;
+  filterNotams(chip.dataset.ids ? chip.dataset.ids.split('|') : [], chip.dataset.rwy);
+});
 
 // ── NOTAM filter (matches by data-notam-id attr so it spans leg sections) ──
 function filterNotams(ids, rwy) {
@@ -645,7 +653,7 @@ function buildPanel(ap) {
     : `NOTAMs active at ${legs[0].ref_time}`;
 
   html += `<div class="panel-section">
-    <div class="panel-label" id="notam-label" data-original="${notamLabelText}">${notamLabelText}</div>`;
+    <div class="panel-label" id="notam-label" data-original="${esc(notamLabelText)}">${esc(notamLabelText)}</div>`;
 
   const allUncovered = legs.every(l => l.notam_covered === false);
   if (allUncovered) {

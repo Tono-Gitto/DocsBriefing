@@ -302,10 +302,30 @@ def _parse_window(line):
         return None, None
 
 
+def _parse_until(line):
+    """Parse a body-level 'DD MMM YY HH:MM UNTIL DD MMM YY HH:MM' line.
+
+    Returns (win_start, win_end) or None. Both timestamps must parse — a
+    partial success would leave a dangling win_start that crashes _is_active.
+    """
+    m = _UNTIL_RE.match(line)
+    if not m:
+        return None
+    try:
+        ws = datetime.strptime(m.group(1).strip(), _UNTIL_FMT).replace(tzinfo=timezone.utc)
+        we = datetime.strptime(m.group(2).strip(), _UNTIL_FMT).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return ws, we
+
+
 def _is_active(win_start, win_end, ref_dt):
-    """True if ref_dt falls within [win_start, win_end], or if no window given."""
+    """True if ref_dt falls within [win_start, win_end], or if no window given.
+    A missing win_end is treated as open-ended (defensive)."""
     if win_start is None:
         return True
+    if win_end is None:
+        return win_start <= ref_dt
     return win_start <= ref_dt <= win_end
 
 
@@ -330,6 +350,25 @@ def _save_learned_fir(code, name, lat, lon):
         with open(LEARNED_FIRS_JSON, "w") as f:
             json.dump(learned, f, indent=2)
         print(f"  INFO: saved FIR {code} ({name}) to {LEARNED_FIRS_JSON} — please verify coordinates")
+
+
+def resolve_fir_centroid(fir_code, fir_name, route_pts):
+    """Full fallback chain for a FIR centroid (used only as haversine search target):
+    derived prefix centroid → data/fir_coords_learned.json → route midpoint
+    (persisted to the learned file for review).
+
+    Returns ((lat, lon), source) with source in {"derived", "learned", "route_midpoint"}.
+    """
+    coords = _fir_coords.derive_fir_centroid(fir_code)
+    if coords:
+        return coords, "derived"
+    entry = _load_learned_firs().get(fir_code)
+    if entry:
+        return (entry["lat"], entry["lon"]), "learned"
+    mid = route_pts[len(route_pts) // 2]
+    coords = (mid["lat"], mid["lon"])
+    _save_learned_fir(fir_code, fir_name, coords[0], coords[1])
+    return coords, "route_midpoint"
 
 
 def _haversine_nm(lat1, lon1, lat2, lon2):
@@ -477,15 +516,13 @@ def parse_notam_pdf(pdf_path):
             continue
 
         # ── UNTIL-style window in body line (FIR NOTAMs; strip from displayed body)
-        if current_section == "ENROUTE" and cur_win_s is None:
-            m_until = _UNTIL_RE.match(line)
-            if m_until:
-                try:
-                    cur_win_s = datetime.strptime(m_until.group(1).strip(), _UNTIL_FMT).replace(tzinfo=timezone.utc)
-                    cur_win_e = datetime.strptime(m_until.group(2).strip(), _UNTIL_FMT).replace(tzinfo=timezone.utc)
-                except ValueError:
-                    cur_body.append(line)
-                continue  # don't add UNTIL line to body regardless
+        if current_section == "ENROUTE" and cur_win_s is None and _UNTIL_RE.match(line):
+            win = _parse_until(line)
+            if win:
+                cur_win_s, cur_win_e = win
+            else:
+                cur_body.append(line)  # unparseable timestamps — keep visible in body
+            continue
 
         cur_body.append(line)
 
@@ -505,15 +542,37 @@ _SUMMARIZE_SYSTEM = (
     "Reply with only the numbered list — no headers, no explanations."
 )
 
+_API_RETRIES = 3
+
+
 def _call_summarize_batch(client, items):
-    """items: [(icao, id, body), ...]. Returns {(icao,id): summary}."""
+    """items: [(icao, id, body), ...]. Returns {(icao,id): summary}.
+
+    Retries transient API failures; returns {} after final failure so callers
+    fall back to first-body-line summaries instead of killing the pipeline.
+    """
+    import time as _time
+
     lines = [f"{i+1}. [{icao} {nid}]\n{body}" for i, (icao, nid, body) in enumerate(items)]
-    msg = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=1024,
-        system=_SUMMARIZE_SYSTEM,
-        messages=[{"role": "user", "content": "\n\n".join(lines)}],
-    )
+    msg = None
+    for attempt in range(_API_RETRIES):
+        try:
+            msg = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1024,
+                system=_SUMMARIZE_SYSTEM,
+                messages=[{"role": "user", "content": "\n\n".join(lines)}],
+            )
+            break
+        except Exception as e:
+            if attempt == _API_RETRIES - 1:
+                print(f"  WARN: summarise batch failed after {_API_RETRIES} attempts ({e}) — "
+                      f"falling back to raw first lines for {len(items)} NOTAMs")
+                return {}
+            wait = 2 ** (attempt + 1)
+            print(f"  WARN: summarise API call failed ({e}) — retrying in {wait}s")
+            _time.sleep(wait)
+
     result = {}
     for line in msg.content[0].text.strip().splitlines():
         m = re.match(r"^(\d+)\.\s+(.+)$", line.strip())
@@ -566,10 +625,14 @@ def main():
         icao = ap["icao"]
         notams_raw = notam_db.get(icao, [])
 
-        ref_str = ap.get("ref_time", "0000Z")
-        hhmm = ref_str.rstrip("Z")
-        d = TAKEOFF_UTC.date()
-        ref_dt = datetime(d.year, d.month, d.day, int(hhmm[:2]), int(hhmm[2:]), tzinfo=timezone.utc)
+        if ap.get("ref_iso"):
+            ref_dt = datetime.fromisoformat(ap["ref_iso"])
+        else:
+            hhmm = ap.get("ref_time", "0000Z").rstrip("Z")
+            d = TAKEOFF_UTC.date()
+            ref_dt = datetime(d.year, d.month, d.day, int(hhmm[:2]), int(hhmm[2:]), tzinfo=timezone.utc)
+            if ref_dt < TAKEOFF_UTC:   # ref never precedes takeoff → crossed midnight
+                ref_dt += timedelta(days=1)
 
         active = [
             {
@@ -605,18 +668,10 @@ def main():
     fir_out = []
     fir_ref_times = []
 
-    learned_firs = _load_learned_firs()
     for fir_icao, fir_data in fir_db.items():
-        coords = _fir_coords.derive_fir_centroid(fir_icao)
-        if coords is None:
-            entry = learned_firs.get(fir_icao)
-            if entry:
-                coords = (entry["lat"], entry["lon"])
-            else:
-                mid = route_pts[len(route_pts) // 2]
-                coords = (mid["lat"], mid["lon"])
-                _save_learned_fir(fir_icao, fir_data["name"], coords[0], coords[1])
-                print(f"  WARN: no centroid derived for FIR {fir_icao} ({fir_data['name']}) — using route midpoint")
+        coords, source = resolve_fir_centroid(fir_icao, fir_data["name"], route_pts)
+        if source == "route_midpoint":
+            print(f"  WARN: no centroid derived for FIR {fir_icao} ({fir_data['name']}) — using route midpoint")
 
         ref_dt, dist_nm, wp_lat, wp_lon = _nearest_waypoint(coords[0], coords[1], route_pts)
 

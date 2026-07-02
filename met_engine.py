@@ -20,6 +20,10 @@ OUT_JSON  = os.path.join(HERE, "data", "airports.json")
 # ETD 1245Z + 20 min taxi = takeoff 1305Z on 20 JUN 2026
 TAKEOFF_UTC = datetime(2026, 6, 20, 13, 5, tzinfo=timezone.utc)
 
+# Per-run parse warnings (reset by main); the Flask pipeline surfaces these
+# in the progress UI so silently skipped airports are visible to the crew.
+WARNINGS = []
+
 # ── MET PDF parsing ──────────────────────────────────────────────────────────
 
 _HEADER_RE = re.compile(r"^([A-Z]{4})\s+-\s*([A-Z]{3,4})\s+-\s+(.+)")
@@ -58,22 +62,28 @@ def parse_met_pdf(pdf_path):
         else:
             airports[current]["taf_raw"] = text
 
+    is_dup = False
     for line in clean:
         m = _HEADER_RE.match(line)
         if m:
-            if mode == "ft":
+            # Flush whatever was being captured — an unterminated METAR is
+            # better kept partial than silently dropped
+            if mode == "sa":
+                finalize("metar")
+            elif mode == "ft":
                 finalize("taf")
             buf = []
             current = m.group(1)
-            if current not in airports:
+            is_dup = current in airports
+            if not is_dup:
                 order.append(current)
-            airports[current] = {
-                "iata": m.group(2),
-                "name": m.group(3).strip(),
-                "runway_info": None,
-                "metar": None,
-                "taf_raw": None,
-            }
+                airports[current] = {
+                    "iata": m.group(2),
+                    "name": m.group(3).strip(),
+                    "runway_info": None,
+                    "metar": None,
+                    "taf_raw": None,
+                }
             mode = "header"
             continue
 
@@ -89,7 +99,7 @@ def parse_met_pdf(pdf_path):
                 mode = "ft"
                 buf = []
             else:
-                if mode == "header":
+                if mode == "header" and not is_dup:
                     # Runway info may wrap to multiple lines (e.g. airports with 5+ runways)
                     if airports[current]["runway_info"] is None:
                         airports[current]["runway_info"] = line
@@ -103,7 +113,9 @@ def parse_met_pdf(pdf_path):
             buf = []
             mode = "done"
 
-    if mode == "ft":
+    if mode == "sa":
+        finalize("metar")
+    elif mode == "ft":
         finalize("taf")
 
     return airports, order
@@ -138,11 +150,32 @@ _GROUP_RE = re.compile(
 )
 
 
-def _ddhh(s):
-    return int(s[:2]) * 1440 + int(s[2:4]) * 60
+def _resolve_ddhh(dd, hh, mm, anchor_dt):
+    """Resolve a TAF day/hour(/minute) token to the UTC datetime nearest anchor_dt.
+
+    TAF tokens carry no month: a token whose day is far from the anchor's day
+    belongs to the adjacent month (e.g. window 3018/0118 read at ref 30 Jun).
+    Hour 24 means midnight at the end of that day.
+    """
+    extra = timedelta(0)
+    if hh == 24:
+        hh = 0
+        extra = timedelta(days=1)
+    candidates = []
+    for moff in (-1, 0, 1):
+        y, m = anchor_dt.year, anchor_dt.month + moff
+        if m == 0:
+            y, m = y - 1, 12
+        elif m == 13:
+            y, m = y + 1, 1
+        try:
+            candidates.append(datetime(y, m, dd, hh, mm, tzinfo=timezone.utc) + extra)
+        except ValueError:
+            pass  # day doesn't exist in that month (e.g. 31 Jun)
+    return min(candidates, key=lambda c: abs(c - anchor_dt))
 
 
-def _parse_groups(taf_raw):
+def _parse_groups(taf_raw, ref_dt):
     matches = list(_GROUP_RE.finditer(taf_raw))
     if not matches:
         # Strip header, return whole thing as base
@@ -161,26 +194,27 @@ def _parse_groups(taf_raw):
 
         if gtype.startswith("FM"):
             # FM DDHHMM — time encoded in type token, no end
-            start_min = int(gtype[2:4]) * 1440 + int(gtype[4:6]) * 60 + int(gtype[6:8])
-            end_min = None
+            start = _resolve_ddhh(int(gtype[2:4]), int(gtype[4:6]), int(gtype[6:8]), ref_dt)
+            end = None
         elif window:
-            parts = window.split("/")
-            start_min, end_min = _ddhh(parts[0]), _ddhh(parts[1])
+            p_start, p_end = window.split("/")
+            start = _resolve_ddhh(int(p_start[:2]), int(p_start[2:4]), 0, ref_dt)
+            # end is anchored to start (validity ≤ 30 h) so 3018/0118 lands in the next month
+            end   = _resolve_ddhh(int(p_end[:2]), int(p_end[2:4]), 0, start)
         else:
             continue  # malformed
 
-        groups.append({"type": gtype, "start": start_min, "end": end_min, "text": gtext})
+        groups.append({"type": gtype, "start": start, "end": end, "text": gtext})
 
     return base_text, groups
 
 
-def _fmt_min(total_min):
-    dd, rem = divmod(total_min, 1440)
-    return f"{dd:02d}{rem // 60:02d}Z"
+def _fmt_dt(dt):
+    return f"{dt.day:02d}{dt.hour:02d}Z"
 
 
 def _fmt_window(start, end):
-    return f"from {_fmt_min(start)}" if end is None else f"{_fmt_min(start)}-{_fmt_min(end)}"
+    return f"from {_fmt_dt(start)}" if end is None else f"{_fmt_dt(start)}-{_fmt_dt(end)}"
 
 
 def condense_taf(taf_raw, ref_dt):
@@ -188,11 +222,12 @@ def condense_taf(taf_raw, ref_dt):
     Returns (base_str, becmg_in_progress|None, [active_overlays]).
     BECMG/FM completed before ref_dt fold into the baseline.
     Overlays cover the OM-A §8.1.7.4.1(7) window: ETA ±1h.
+    All group times are resolved to real datetimes so month/year boundaries
+    compare correctly.
     """
-    base_text, groups = _parse_groups(taf_raw)
-    ref_min   = ref_dt.day * 1440 + ref_dt.hour * 60 + ref_dt.minute
-    win_start = ref_min - 60
-    win_end   = ref_min + 60
+    base_text, groups = _parse_groups(taf_raw, ref_dt)
+    win_start = ref_dt - timedelta(hours=1)
+    win_end   = ref_dt + timedelta(hours=1)
     baseline  = base_text
     becmg_prog = None
     overlays   = []
@@ -200,24 +235,23 @@ def condense_taf(taf_raw, ref_dt):
     for g in sorted(groups, key=lambda x: x["start"]):
         t = g["type"]
         s = g["start"]
-        e = g["end"] if g["end"] is not None else float("inf")
 
         if t == "BECMG" or t.startswith("FM"):
             if g["end"] is None:              # FM: complete once past start
-                if ref_min >= s:
+                if ref_dt >= s:
                     baseline = g["text"]
                 elif s < win_end:             # FM starts within +1h → overlay
                     overlays.append(g)
             else:
-                if ref_min >= g["end"]:
+                if ref_dt >= g["end"]:
                     baseline = g["text"]      # transition complete → fold
-                elif s <= ref_min < g["end"]:
+                elif s <= ref_dt < g["end"]:
                     becmg_prog = g            # in progress right now
-                elif s > ref_min and s < win_end:
+                elif s > ref_dt and s < win_end:
                     overlays.append(g)        # upcoming within +1h
         else:  # TEMPO / PROB30 TEMPO / PROB40 TEMPO / bare PROB
             # Show if group overlaps with [ETA−1h, ETA+1h]
-            if s < win_end and e > win_start:
+            if s < win_end and g["end"] is not None and g["end"] > win_start:
                 overlays.append(g)
 
     becmg_out = (
@@ -237,6 +271,9 @@ def condense_taf(taf_raw, ref_dt):
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
+    global WARNINGS
+    WARNINGS = []
+
     with open(ROUTE_JSON) as f:
         route_pts = json.load(f)
 
@@ -247,7 +284,9 @@ def main():
     for icao in order:
         d = met_data[icao]
         if icao not in coords:
-            print(f"  WARN: no coords for {icao} ({d['name']})")
+            msg = f"no coords for {icao} ({d['name']}) — airport dropped from briefing"
+            WARNINGS.append(msg)
+            print(f"  WARN: {msg}")
             continue
 
         lat, lon = coords[icao]
@@ -265,6 +304,7 @@ def main():
             "lat": lat,
             "lon": lon,
             "ref_time": ref_dt.strftime("%H%MZ"),
+            "ref_iso": ref_dt.isoformat(),
             "dist_nm": round(dist_nm),
             "metar": d["metar"],
             "taf_raw": d["taf_raw"],

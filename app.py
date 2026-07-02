@@ -28,7 +28,10 @@ from datetime import datetime, timedelta, timezone
 
 import pdfplumber
 from dotenv import load_dotenv
-from flask import Flask, Response, redirect, render_template_string, request, send_file
+from flask import (
+    Flask, Response, redirect, render_template_string, request,
+    send_file, send_from_directory,
+)
 from werkzeug.utils import secure_filename
 
 # Load .env before anything else so ANTHROPIC_API_KEY is in os.environ
@@ -175,7 +178,7 @@ def _extract_ofp_constants(ofp_path):
     return etd_utc, taxi_min, flight_time_min
 
 
-def _extract_flight_info(ofp_path, etd_utc, flight_time_min):
+def _extract_flight_info(ofp_path, etd_utc, takeoff_utc, flight_time_min):
     """
     Read OFP page 1. Returns a dict for flight_info.json:
       {flight, dep, dest, date, acft, reg, etd, eta}
@@ -183,8 +186,8 @@ def _extract_flight_info(ofp_path, etd_utc, flight_time_min):
     with pdfplumber.open(ofp_path) as pdf:
         text = pdf.pages[0].extract_text() or ""
 
-    from datetime import timedelta
-    eta_utc = etd_utc + timedelta(minutes=flight_time_min + 20)  # +taxi back
+    # ETA = touchdown: takeoff (ETD + parsed taxi-out) + airborne time
+    eta_utc = takeoff_utc + timedelta(minutes=flight_time_min)
 
     flight = _FLIGHT_RE.search(text)
     dep    = _DEP_RE.search(text)
@@ -213,11 +216,10 @@ def _extract_flight_info(ofp_path, etd_utc, flight_time_min):
 
 def _fmt_win(n):
     if n.get("win_start"):
-        return (
-            n["win_start"].strftime("%-d %b %Y %H:%MZ")
-            + " – "
-            + n["win_end"].strftime("%-d %b %Y %H:%MZ")
-        )
+        start = n["win_start"].strftime("%-d %b %Y %H:%MZ")
+        if n.get("win_end"):
+            return start + " – " + n["win_end"].strftime("%-d %b %Y %H:%MZ")
+        return "from " + start  # open-ended window
     import notam_engine
     return notam_engine._fmt_daily_windows(n.get("daily_windows"))
 
@@ -234,6 +236,7 @@ def _merge_airports_legs(leg_airports_list):
             leg_entry = {
                 "leg":               leg_idx,
                 "ref_time":          ap.get("ref_time", "0000Z"),
+                "ref_iso":           ap.get("ref_iso"),
                 "taf_base":          ap.get("taf_base"),
                 "becmg_in_progress": ap.get("becmg_in_progress"),
                 "active_overlays":   ap.get("active_overlays", []),
@@ -312,11 +315,14 @@ def _filter_general_notams(general_db, fir_db, leg_flight_infos):
             try:
                 msg = client.messages.create(
                     model="claude-haiku-4-5-20251001",
-                    max_tokens=512,
+                    max_tokens=1024,
                     system=filter_system,
                     messages=[{"role": "user", "content": user_msg}],
                 )
-                verdicts = json.loads(msg.content[0].text.strip())
+                raw_text = msg.content[0].text.strip()
+                if raw_text.startswith("```"):  # tolerate fenced JSON
+                    raw_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text)
+                verdicts = json.loads(raw_text)
                 verdict_map = {v["id"]: bool(v.get("relevant", True)) for v in verdicts if "id" in v}
             except Exception as e:
                 print(f"  WARN: general NOTAM filter failed ({e}); defaulting all to included")
@@ -352,6 +358,25 @@ def _filter_general_notams(general_db, fir_db, leg_flight_infos):
     return output_sections
 
 
+def _leg_ref_dt(leg_entry, takeoff_utc):
+    """Full UTC datetime at which the aircraft is nearest this airport on this leg.
+
+    Prefers the exact ref_iso written by met_engine. The HHMMZ fallback anchors
+    to the takeoff date and rolls past midnight when needed — a ref time can
+    never precede takeoff, so an "earlier" clock time means the next day.
+    """
+    iso = leg_entry.get("ref_iso")
+    if iso:
+        return datetime.fromisoformat(iso)
+    ref_str = leg_entry.get("ref_time", "0000Z").rstrip("Z")
+    d = takeoff_utc.date()
+    ref_dt = datetime(d.year, d.month, d.day, int(ref_str[:2]), int(ref_str[2:]),
+                      tzinfo=timezone.utc)
+    if ref_dt < takeoff_utc:
+        ref_dt += timedelta(days=1)
+    return ref_dt
+
+
 def _is_active_for_flight(win_start, win_end, flight_start, flight_end):
     """True if the NOTAM window overlaps the full flight duration [flight_start, flight_end]."""
     if win_start is None:
@@ -384,7 +409,6 @@ def _fir_marker_position(centroid, route_pts, airports, threshold_nm=10.0):
 def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeoffs, leg_flight_infos):
     """Attach per-leg NOTAMs to airports; write airports.json, fir_notams.json, general_notams.json."""
     import notam_engine
-    import fir_coords as _fir_coords
 
     notam_db, fir_db, general_db = notam_engine.parse_notam_pdf(notam_path)
 
@@ -392,13 +416,7 @@ def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeo
     for ap in airports:
         for leg_entry in ap["legs"]:
             takeoff_utc = leg_takeoffs[leg_entry["leg"] - 1]
-            flight_date = takeoff_utc.date()
-            ref_str = leg_entry.get("ref_time", "0000Z").rstrip("Z")
-            ref_dt = datetime(
-                flight_date.year, flight_date.month, flight_date.day,
-                int(ref_str[:2]), int(ref_str[2:]),
-                tzinfo=timezone.utc,
-            )
+            ref_dt = _leg_ref_dt(leg_entry, takeoff_utc)
             raw = notam_db.get(ap["icao"], [])
             active = [
                 {"id": n["id"], "tier": notam_engine._effective_tier(n, ref_dt), "body": n["body"], "window": _fmt_win(n)}
@@ -439,11 +457,11 @@ def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeo
             route_pts = json.load(f)
 
         for fir_icao, fir_data in fir_db.items():
-            coords = _fir_coords.derive_fir_centroid(fir_icao)
-            if not coords:
-                if leg_local == 1:
-                    _progress(f"  WARN: no centroid derived for FIR {fir_icao} ({fir_data['name']}) — skipped")
-                continue
+            coords, source = notam_engine.resolve_fir_centroid(
+                fir_icao, fir_data["name"], route_pts
+            )
+            if source == "route_midpoint" and leg_local == 1:
+                _progress(f"  WARN: no centroid known for FIR {fir_icao} ({fir_data['name']}) — using route midpoint")
             ref_dt, _, _, _ = notam_engine._nearest_waypoint(
                 coords[0], coords[1], route_pts
             )
@@ -523,7 +541,7 @@ def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
                 _progress(f"[G{g_num}/L{local_idx}] Reading OFP…")
                 etd_utc, taxi_min, flt_min = _extract_ofp_constants(ofp_path)
                 takeoff_utc = etd_utc + timedelta(minutes=taxi_min)
-                fi = _extract_flight_info(ofp_path, etd_utc, flt_min)
+                fi = _extract_flight_info(ofp_path, etd_utc, takeoff_utc, flt_min)
                 _progress(
                     f"  {fi['flight']} {fi['dep']}→{fi['dest']}  "
                     f"ETD {fi['etd']}  TAKEOFF {takeoff_utc.strftime('%H%MZ')}"
@@ -561,6 +579,9 @@ def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
                 met_engine.OUT_JSON    = tmp
                 met_engine.TAKEOFF_UTC = ld["takeoff_utc"]
                 met_engine.main()
+                if ld["local_idx"] == 1:  # same MET PDF every leg — warn once
+                    for w in met_engine.WARNINGS:
+                        _progress(f"  WARN: {w}")
                 with open(tmp) as f:
                     leg_airports_list.append(json.load(f))
                 os.remove(tmp)
@@ -612,21 +633,7 @@ def upload_page():
 
 @app.route("/upload", methods=["POST"])
 def upload_files():
-    with _lock:
-        if _current_run["status"] == "running":
-            return "A pipeline is already running. Please wait for it to finish.", 429
-
-    # Sweep run dirs older than 24 h
-    cutoff = time.time() - 86400
-    for name in os.listdir(RUNS_DIR):
-        path = os.path.join(RUNS_DIR, name)
-        try:
-            if os.path.isdir(path) and os.stat(path).st_mtime < cutoff:
-                shutil.rmtree(path, ignore_errors=True)
-        except OSError:
-            pass
-
-    # Collect OFP files (ofp_1 required; ofp_2..4 optional)
+    # Validate all file fields before touching any shared state or disk
     ofp_file_objs = []
     for i in range(1, 5):
         f = request.files.get(f"ofp_{i}")
@@ -648,23 +655,14 @@ def upload_files():
 
     leg_count   = len(ofp_file_objs)
     group_count = 1 if leg_count <= 2 else 2
+    run_id      = str(uuid.uuid4())
 
-    run_id     = str(uuid.uuid4())
-    upload_dir = os.path.join(UPLOAD_DIR, run_id)
-    os.makedirs(upload_dir, exist_ok=True)
-
-    ofp_paths = []
-    for i, f in enumerate(ofp_file_objs, start=1):
-        path = os.path.join(upload_dir, f"ofp_{i}.pdf")
-        f.save(path)
-        ofp_paths.append(path)
-
-    met_path   = os.path.join(upload_dir, "met.pdf")
-    notam_path = os.path.join(upload_dir, "notam.pdf")
-    request.files["met"].save(met_path)
-    request.files["notam"].save(notam_path)
-
+    # Atomic check-and-claim: the pipeline monkey-patches module globals, so two
+    # concurrent runs would silently corrupt each other's output. Claim the slot
+    # in the same lock acquisition as the "running" check.
     with _lock:
+        if _current_run["status"] == "running":
+            return "A pipeline is already running. Please wait for it to finish.", 429
         _current_run.update({
             "run_id":      run_id,
             "status":      "running",
@@ -673,6 +671,38 @@ def upload_files():
             "leg_count":   leg_count,
             "group_count": group_count,
         })
+
+    upload_dir = os.path.join(UPLOAD_DIR, run_id)
+    try:
+        # Sweep run dirs older than 24 h
+        cutoff = time.time() - 86400
+        for name in os.listdir(RUNS_DIR):
+            path = os.path.join(RUNS_DIR, name)
+            try:
+                if os.path.isdir(path) and os.stat(path).st_mtime < cutoff:
+                    shutil.rmtree(path, ignore_errors=True)
+            except OSError:
+                pass
+
+        os.makedirs(upload_dir, exist_ok=True)
+
+        ofp_paths = []
+        for i, f in enumerate(ofp_file_objs, start=1):
+            path = os.path.join(upload_dir, f"ofp_{i}.pdf")
+            f.save(path)
+            ofp_paths.append(path)
+
+        met_path   = os.path.join(upload_dir, "met.pdf")
+        notam_path = os.path.join(upload_dir, "notam.pdf")
+        request.files["met"].save(met_path)
+        request.files["notam"].save(notam_path)
+    except Exception:
+        # Release the claimed slot so the next upload isn't locked out
+        shutil.rmtree(upload_dir, ignore_errors=True)
+        with _lock:
+            _current_run["status"] = "error"
+            _current_run["error"]  = "Failed to store uploaded files"
+        raise
 
     t = threading.Thread(
         target=_run_pipeline,
@@ -695,6 +725,10 @@ def progress_page(run_id):
 def api_status(run_id):
     with _lock:
         data = dict(_current_run)
+        data["messages"] = list(_current_run["messages"])  # snapshot; list is mutated by pipeline thread
+    if data.get("run_id") != run_id:
+        return Response(json.dumps({"error": "unknown or superseded run"}),
+                        status=404, mimetype="application/json")
     return Response(json.dumps(data), mimetype="application/json")
 
 
@@ -709,19 +743,15 @@ def serve_group_data(group, filename):
         run_id = _current_run.get("run_id")
         status = _current_run.get("status")
     if run_id and status == "done":
-        path = os.path.join(RUNS_DIR, run_id, str(group), filename)
-        if os.path.exists(path):
-            return send_file(path)
+        # send_from_directory rejects path traversal and 404s missing files
+        return send_from_directory(os.path.join(RUNS_DIR, run_id, str(group)), filename)
     return Response("Not found", status=404)
 
 
 @app.route("/data/<filename>")
 def serve_data(filename):
     # Legacy endpoint: serves the static data/ folder (MVP demo fallback only)
-    fallback = os.path.join(HERE, "data", filename)
-    if os.path.exists(fallback):
-        return send_file(fallback)
-    return Response("Not found", status=404)
+    return send_from_directory(os.path.join(HERE, "data"), filename)
 
 
 # ── Progress page ─────────────────────────────────────────────────────────────
@@ -763,8 +793,16 @@ _PROGRESS_HTML = """<!doctype html>
 
     function poll() {
       fetch("/api/status/" + runId)
-        .then(r => r.json())
+        .then(r => {
+          if (r.status === 404) {
+            clearInterval(timer);
+            addLine("This run is no longer active (superseded or server restarted).", "err");
+            return null;
+          }
+          return r.json();
+        })
         .then(data => {
+          if (!data) return;
           const msgs = data.messages || [];
           for (; seen < msgs.length; seen++) {
             const m = msgs[seen];

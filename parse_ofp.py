@@ -155,6 +155,8 @@ def parse_ofp() -> list:
             acct = FLIGHT_TIME_MIN
         else:
             acct = _get_acct(row2)
+            if acct is None:
+                continue  # no elapsed time — unusable for ref-time search
 
         name = _get_name(row1)
         waypoints.append({"name": name, "lat": lat, "lon": lon, "acct_min": acct})
@@ -167,15 +169,25 @@ def main():
     waypoints = parse_ofp()
 
     if not waypoints:
-        print("ERROR: no waypoints extracted")
-        return
+        raise ValueError(
+            f"No waypoints extracted from {os.path.basename(OFP_PDF)} — "
+            "route section not recognised (is this an OFP PDF?)"
+        )
 
-    # Sanity check: last waypoint ACCT should equal FLIGHT_TIME_MIN
+    # Sanity check: last waypoint ACCT must equal FLIGHT_TIME_MIN. The last
+    # block's ACCT is overridden to FLIGHT_TIME_MIN during parsing, so a
+    # mismatch means the final block failed to parse — the route is truncated
+    # and every downstream ref_time would be wrong.
     last = waypoints[-1]
     print(f"Waypoints extracted: {len(waypoints)}")
     print(f"First: {waypoints[0]}")
     print(f"Last:  {last}")
-    print(f"Last acct_min={last['acct_min']} (expected {FLIGHT_TIME_MIN}) — {'OK' if last['acct_min'] == FLIGHT_TIME_MIN else 'MISMATCH'}")
+    if last["acct_min"] != FLIGHT_TIME_MIN:
+        raise ValueError(
+            f"Route parse incomplete: last waypoint ACCT {last['acct_min']} min "
+            f"!= OFP stated flight time {FLIGHT_TIME_MIN} min "
+            f"({len(waypoints)} waypoints parsed)"
+        )
 
     with open(OUT_JSON, "w") as f:
         json.dump(waypoints, f, indent=2)

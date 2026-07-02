@@ -7,7 +7,7 @@ prefix with the FIR code.  This works globally with no external API — it reuse
 the airports_raw.csv already downloaded by airport_coords.py.
 """
 
-import csv, os, re
+import csv, math, os, re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _CSV  = os.path.join(HERE, "data", "airports_raw.csv")
@@ -49,8 +49,12 @@ def derive_fir_centroid(fir_code: str, min_airports: int = 3):
         prefix = fir_code[:prefix_len]
         matches = [(lat, lon) for icao, lat, lon in airports if icao.startswith(prefix)]
         if len(matches) >= min_airports:
+            # Longitude needs a circular mean: near the antimeridian a plain
+            # average of e.g. +179° and −179° gives 0° (mid-Atlantic).
+            x = sum(math.cos(math.radians(m[1])) for m in matches)
+            y = sum(math.sin(math.radians(m[1])) for m in matches)
             return (
                 round(sum(m[0] for m in matches) / len(matches), 4),
-                round(sum(m[1] for m in matches) / len(matches), 4),
+                round(math.degrees(math.atan2(y, x)), 4),
             )
     return None
