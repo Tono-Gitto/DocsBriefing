@@ -130,6 +130,38 @@ _GROUP_RE = re.compile(
     r"\b(PROB30 TEMPO|PROB40 TEMPO|PROB30|PROB40|BECMG|TEMPO|FM\d{6})\b\s*(\d{4}/\d{4}|)"
 )
 
+_WIND_RE = re.compile(r"^(VRB|\d{3})\d{2,3}(G\d{2,3})?(KT|MPS|KMH)$")
+_WIND_VAR_RE = re.compile(r"^\d{3}V\d{3}$")
+
+
+def _leading_wind(s):
+    toks = s.split()
+    return toks[0] if toks and _WIND_RE.match(toks[0]) else None
+
+
+def _is_pure_wind_change(text):
+    """True if the group states only wind (plus an optional 250V310 variation)."""
+    toks = text.split()
+    if not toks or not _WIND_RE.match(toks[0]):
+        return False
+    return all(_WIND_VAR_RE.match(t) for t in toks[1:])
+
+
+def _fold_conditions(old, new):
+    """Fold a completed/in-progress BECMG or FM group onto the running baseline.
+
+    A wind-only change keeps old's non-wind elements (visibility/weather/cloud,
+    including CAVOK) and swaps in the new wind; any group that also states
+    visibility/weather/cloud fully replaces the baseline (TAF convention).
+    """
+    if not _is_pure_wind_change(new):
+        return new
+    old_wind = _leading_wind(old)
+    if old_wind is None:
+        return new
+    old_rest = old[len(old_wind):].strip()
+    return f"{new} {old_rest}".strip() if old_rest else new
+
 
 def _resolve_ddhh(dd, hh, mm, anchor_dt):
     """Resolve a TAF day/hour(/minute) token to the UTC datetime nearest anchor_dt.
@@ -211,6 +243,7 @@ def condense_taf(taf_raw, ref_dt):
     win_end   = ref_dt + timedelta(hours=1)
     baseline  = base_text
     becmg_prog = None
+    becmg_prog_base = base_text
     overlays   = []
 
     for g in sorted(groups, key=lambda x: x["start"]):
@@ -220,14 +253,15 @@ def condense_taf(taf_raw, ref_dt):
         if t == "BECMG" or t.startswith("FM"):
             if g["end"] is None:              # FM: complete once past start
                 if ref_dt >= s:
-                    baseline = g["text"]
+                    baseline = _fold_conditions(baseline, g["text"])
                 elif s < win_end:             # FM starts within +1h → overlay
                     overlays.append(g)
             else:
                 if ref_dt >= g["end"]:
-                    baseline = g["text"]      # transition complete → fold
+                    baseline = _fold_conditions(baseline, g["text"])  # fold
                 elif s <= ref_dt < g["end"]:
                     becmg_prog = g            # in progress right now
+                    becmg_prog_base = baseline  # pre-BECMG conditions to fold onto
                 elif s > ref_dt and s < win_end:
                     overlays.append(g)        # upcoming within +1h
         else:  # TEMPO / PROB30 TEMPO / PROB40 TEMPO / bare PROB
@@ -236,7 +270,7 @@ def condense_taf(taf_raw, ref_dt):
                 overlays.append(g)
 
     becmg_out = (
-        {"text": becmg_prog["text"],
+        {"text": _fold_conditions(becmg_prog_base, becmg_prog["text"]),
          "window": _fmt_window(becmg_prog["start"], becmg_prog["end"])}
         if becmg_prog else None
     )

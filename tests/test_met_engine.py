@@ -6,7 +6,7 @@ arithmetic used to get wrong.
 """
 from datetime import datetime, timezone
 
-from met_engine import condense_taf
+from met_engine import condense_taf, _fold_conditions, _is_pure_wind_change
 
 
 def _dt(y, mo, d, h, mi=0):
@@ -18,17 +18,19 @@ BASE_TAF = "FT 200500Z 2006/2112 20010KT 9999 FEW020"
 
 class TestFolding:
     def test_completed_becmg_folds_into_baseline(self):
+        # Wind-only BECMG carries the base visibility/cloud forward.
         taf = BASE_TAF + " BECMG 2008/2010 25015KT"
         base, becmg, overlays = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
-        assert base == "25015KT"
+        assert base == "25015KT 9999 FEW020"
         assert becmg is None
         assert overlays == []
 
     def test_becmg_in_progress_not_folded(self):
+        # In-progress wind-only BECMG shows the full target conditions.
         taf = BASE_TAF + " BECMG 2008/2010 25015KT"
         base, becmg, overlays = condense_taf(taf, _dt(2026, 6, 20, 9, 0))
         assert base == "20010KT 9999 FEW020"
-        assert becmg is not None and becmg["text"] == "25015KT"
+        assert becmg is not None and becmg["text"] == "25015KT 9999 FEW020"
 
     def test_upcoming_becmg_within_one_hour_is_overlay(self):
         taf = BASE_TAF + " BECMG 2008/2010 25015KT"
@@ -45,10 +47,62 @@ class TestFolding:
         assert overlays == []  # FM210400 far in the future
 
     def test_two_sequential_becmg_first_folds_second_in_progress(self):
+        # Both BECMGs are wind-only: base carries 9999 FEW020, and the
+        # in-progress second BECMG folds onto the already-folded baseline.
         taf = BASE_TAF + " BECMG 2008/2010 25015KT BECMG 2014/2016 30008KT"
         base, becmg, overlays = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
-        assert base == "25015KT"
-        assert becmg is not None and becmg["text"] == "30008KT"
+        assert base == "25015KT 9999 FEW020"
+        assert becmg is not None and becmg["text"] == "30008KT 9999 FEW020"
+
+
+class TestWindOnlyFold:
+    """Wind-only BECMG/FM carries the previous conditions forward (only the
+    wind changes); any group that also states vis/weather/cloud fully replaces."""
+
+    def test_wind_only_becmg_carries_vis_and_cloud(self):
+        taf = "FT 200500Z 2006/2112 24008KT 9999 SCT020 BECMG 2008/2010 34005KT"
+        base, becmg, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        assert base == "34005KT 9999 SCT020"
+        assert becmg is None
+
+    def test_wind_only_becmg_carries_cavok(self):
+        taf = "FT 200500Z 2006/2112 20005KT CAVOK BECMG 2008/2010 04004KT"
+        base, _, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        assert base == "04004KT CAVOK"
+
+    def test_wind_only_fm_carries_forward(self):
+        taf = "FT 200500Z 2006/2112 24008KT 9999 SCT020 FM201200 34005KT"
+        base, _, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        assert base == "34005KT 9999 SCT020"
+
+    def test_gust_token_is_wind_only(self):
+        taf = "FT 200500Z 2006/2112 24008KT 9999 SCT020 BECMG 2008/2010 34005G20KT"
+        base, _, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        assert base == "34005G20KT 9999 SCT020"
+
+    def test_non_wind_only_becmg_replaces(self):
+        taf = "FT 200500Z 2006/2112 24008KT 9999 SCT020 BECMG 2008/2010 30010KT 4000 BR"
+        base, _, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        assert base == "30010KT 4000 BR"
+
+    def test_in_progress_wind_only_becmg_merged(self):
+        taf = "FT 200500Z 2006/2112 24008KT 9999 SCT020 BECMG 2014/2016 34005KT"
+        _, becmg, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        assert becmg is not None and becmg["text"] == "34005KT 9999 SCT020"
+
+    def test_is_pure_wind_change(self):
+        assert _is_pure_wind_change("34005KT")
+        assert _is_pure_wind_change("VRB03KT")
+        assert _is_pure_wind_change("24008KT 240V300")  # wind + direction variation
+        assert not _is_pure_wind_change("34005KT 9999")
+        assert not _is_pure_wind_change("CAVOK")
+        assert not _is_pure_wind_change("")
+
+    def test_fold_conditions_direct(self):
+        assert _fold_conditions("24008KT 9999 SCT020", "34005KT") == "34005KT 9999 SCT020"
+        assert _fold_conditions("24008KT 9999", "30010KT 4000 BR") == "30010KT 4000 BR"
+        # base without a leading wind token → replace, don't fabricate
+        assert _fold_conditions("CAVOK", "34005KT") == "34005KT"
 
 
 class TestOverlayWindow:
@@ -91,14 +145,14 @@ class TestMonthBoundary:
         # Ref 1 Jul 00:30 — BECMG ended 30 Jun 22:00, transition complete.
         taf = "FT 301700Z 3018/0118 20010KT 9999 FEW020 BECMG 3020/3022 25015KT"
         base, becmg, _ = condense_taf(taf, _dt(2026, 7, 1, 0, 30))
-        assert base == "25015KT"
+        assert base == "25015KT 9999 FEW020"
         assert becmg is None
 
     def test_hour_24_window_token(self):
         # 3018/3024 ends at 1 Jul 00:00; by 00:30 it has folded.
         taf = "FT 301700Z 3018/0118 20010KT 9999 FEW020 BECMG 3022/3024 25015KT"
         base, becmg, _ = condense_taf(taf, _dt(2026, 7, 1, 0, 30))
-        assert base == "25015KT"
+        assert base == "25015KT 9999 FEW020"
         assert becmg is None
 
     def test_year_boundary(self):
