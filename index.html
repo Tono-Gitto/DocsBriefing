@@ -296,6 +296,39 @@
     }
     .leg-divider-label.leg2 { color: #f4a15b; }
 
+    /* ── Weather severity tag (panel) ── */
+    .wx-tag {
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+
+    /* ── Weather/role legend (map corner) ── */
+    #wxLegend {
+      position: fixed;
+      left: 12px;
+      bottom: 18px;
+      z-index: 500;
+      background: rgba(18,19,42,0.92);
+      border: 1px solid #3a4060;
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 0.72rem;
+      color: #ccd;
+      line-height: 1.7;
+      pointer-events: none;
+    }
+    #wxLegend .row { display: flex; align-items: center; gap: 6px; }
+    #wxLegend .dot {
+      display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+      flex-shrink: 0;
+    }
+    #wxLegend .ring {
+      display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+      border: 2px solid; background: transparent; flex-shrink: 0;
+    }
+    #wxLegend .sep { height: 1px; background: #3a4060; margin: 5px 0; }
+
     /* ── Leaflet tooltip (hover label) ── */
     .leaflet-tooltip {
       background: rgba(18,20,44,0.92);
@@ -322,6 +355,14 @@
 </div>
 
 <div id="map"></div>
+<div id="wxLegend">
+  <div class="row"><span class="dot" style="background:#4cff91"></span> Good</div>
+  <div class="row"><span class="dot" style="background:#ffd23f"></span> Caution</div>
+  <div class="row"><span class="dot" style="background:#ff5050"></span> Significant</div>
+  <div class="sep"></div>
+  <div class="row"><span class="ring" style="border-color:#fff"></span> Dep/Dest</div>
+  <div class="row"><span class="ring" style="border-color:#d060a0"></span> Alternate</div>
+</div>
 
 <!-- Weather side panel -->
 <div id="panel">
@@ -584,6 +625,7 @@ function buildPanel(ap) {
     active_overlays:   ap.active_overlays || [],
     notams:            ap.notams || [],
     notam_covered:     ap.notam_covered,
+    wx_tier:           ap.wx_tier,
   }];
 
   const allNotams = legs.flatMap(l => l.notams || []);
@@ -602,10 +644,10 @@ function buildPanel(ap) {
   legs.forEach(leg => {
     if (multiLeg) {
       const cls = leg.leg === 2 ? "leg-divider-label leg2" : "leg-divider-label";
-      html += `<div class="leg-divider"><span class="${cls}">LEG ${leg.leg} · ${esc(leg.ref_time)}</span></div>`;
+      html += `<div class="leg-divider"><span class="${cls}">LEG ${leg.leg} · ${esc(leg.ref_time)}</span> ${wxTag(leg.wx_tier)}</div>`;
     }
     html += `<div class="panel-section">
-      <div class="panel-label">Conditions at ${esc(leg.ref_time)}</div>`;
+      <div class="panel-label">Conditions at ${esc(leg.ref_time)} ${multiLeg ? "" : wxTag(leg.wx_tier)}</div>`;
     html += leg.taf_base
       ? `<div class="panel-value taf-clickable" onclick="toggleTaf(this,'${ap.icao}')">${esc(leg.taf_base)}</div>`
       : `<div class="no-data">No TAF</div>`;
@@ -826,11 +868,14 @@ function _updateFlightBadge(sections) {
 }
 
 // ── Icons ──────────────────────────────────────────────────────────────────
-function circleIcon(color, size) {
+function circleIcon(color, size, ringColor) {
+  const border = ringColor
+    ? `3px solid ${ringColor}`
+    : `2px solid rgba(255,255,255,0.5)`;
   return L.divIcon({
     className: "",
     html: `<div style="width:${size}px;height:${size}px;border-radius:50%;
-      background:${color};border:2px solid rgba(255,255,255,0.5);
+      background:${color};border:${border};
       box-shadow:0 0 8px ${color}88;cursor:pointer;"></div>`,
     iconSize:   [size, size],
     iconAnchor: [size / 2, size / 2],
@@ -849,15 +894,31 @@ function firIcon(color) {
   });
 }
 
-// ── Marker color: dep/dest/turnaround=green, alternate=dark-pink, met=light-blue ──
+// ── Marker color: weather severity (RED/YELLOW/GREEN); role shown via ring ──
 let depSet  = new Set();
 let destSet = new Set();
 let altnSet = new Set();
 
-function markerColor(icao) {
-  if (depSet.has(icao) || destSet.has(icao)) return "#4cff91";  // green = dep/dest/turnaround
-  if (altnSet.has(icao))                     return "#d060a0";  // dark pink = alternate
-  return "#a0c8ff";                                             // light blue = enroute MET
+const WX_COLORS = { RED: "#ff5050", YELLOW: "#ffd23f", GREEN: "#4cff91" };
+const WX_RANK   = { GREEN: 0, YELLOW: 1, RED: 2 };
+
+function worstWxTier(legs) {
+  return (legs || []).reduce(
+    (worst, l) => (WX_RANK[l.wx_tier] > WX_RANK[worst] ? l.wx_tier : worst),
+    "GREEN"
+  );
+}
+function markerColor(ap) {
+  return WX_COLORS[worstWxTier(ap.legs)];
+}
+function wxTag(tier) {
+  const color = WX_COLORS[tier] || WX_COLORS.YELLOW;
+  return `<span class="wx-tag" style="color:${color}">&#9679; ${esc(tier || "YELLOW")}</span>`;
+}
+function roleRing(icao) {
+  if (depSet.has(icao) || destSet.has(icao)) return "#ffffff";  // white ring = dep/dest/turnaround
+  if (altnSet.has(icao))                     return "#d060a0";  // pink ring = alternate
+  return null;                                                   // enroute: no ring
 }
 function markerSize(icao) {
   return (depSet.has(icao) || destSet.has(icao)) ? 26 : 20;
@@ -872,11 +933,12 @@ function renderHeaderAirportBtns(airports, legs) {
   const seen  = new Set();
   const ordered = [];
 
-  // 1. Dep/dest in leg order, deduped (green)
+  // 1. Dep/dest in leg order, deduped (white — matches the role-ring convention;
+  //    green is reserved for GREEN/good weather on the map markers)
   legs.forEach(l => {
     [l.dep, l.dest].forEach(icao => {
       if (icao && !seen.has(icao) && apMap[icao]) {
-        ordered.push({ ap: apMap[icao], color: '#4cff91' });
+        ordered.push({ ap: apMap[icao], color: '#ffffff' });
         seen.add(icao);
       }
     });
@@ -963,10 +1025,11 @@ Promise.all([
 
   // Airport markers
   airports.forEach(ap => {
-    const color  = markerColor(ap.icao);
+    const color  = markerColor(ap);
+    const ring   = roleRing(ap.icao);
     const size   = markerSize(ap.icao);
     const zIndex = markerZIndex(ap.icao);
-    const icon   = circleIcon(color, size);
+    const icon   = circleIcon(color, size, ring);
     const offset = size > 20 ? [0, -12] : [0, -9];
     L.marker([ap.lat, ap.lon], { icon, zIndexOffset: zIndex })
       .bindTooltip(ap.icao, { direction: "top", offset })

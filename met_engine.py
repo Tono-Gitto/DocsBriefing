@@ -283,6 +283,113 @@ def condense_taf(taf_raw, ref_dt):
     return baseline, becmg_out, overlay_out
 
 
+# ── Weather severity tier (RED/YELLOW/GREEN) ─────────────────────────────────
+# Mirrors the _classify_tier pattern in notam_engine.py: keyword/regex tables
+# feeding one classification function, unit-tested against fixed thresholds.
+
+_CEILING_RE = re.compile(r"^(BKN|OVC|VV)(\d{3})$")
+_VIS_TOKEN_RE = re.compile(r"^\d{4}$")
+_WX_RED_RE = re.compile(r"\b(TS\w*|FZRA|FZDZ|FZFG|FC|SS|DS)\b")
+
+_TIER_RANK = {"GREEN": 0, "YELLOW": 1, "RED": 2}
+
+
+def _worse_tier(a, b):
+    return a if _TIER_RANK[a] >= _TIER_RANK[b] else b
+
+
+def _cap_at_yellow(tier):
+    return tier if _TIER_RANK[tier] <= _TIER_RANK["YELLOW"] else "YELLOW"
+
+
+def _vis_and_ceiling(toks):
+    vis_m = None
+    ceiling_ft = None
+    for tok in toks:
+        if _VIS_TOKEN_RE.match(tok):
+            vis_m = int(tok)
+        m = _CEILING_RE.match(tok)
+        if m:
+            ft = int(m.group(2)) * 100
+            ceiling_ft = ft if ceiling_ft is None else min(ceiling_ft, ft)
+    return vis_m, ceiling_ft
+
+
+def _tier_from_vis_ceiling(vis_m, ceiling_ft):
+    if vis_m is None:
+        vis_m = 9999
+    if ceiling_ft is None:
+        ceiling_ft = 999999
+    if vis_m < 1600 or ceiling_ft < 500:
+        return "RED"
+    if vis_m < 5000 or ceiling_ft < 2000:
+        return "YELLOW"
+    return "GREEN"
+
+
+def _tier_for_text(text):
+    """Classify a full-state TAF condition string (taf_base, or a folded
+    becmg_in_progress text) at full confidence.
+
+    Ceiling = lowest BKN/OVC/VV height only (FEW/SCT never count as a
+    ceiling). Visibility = a bare 4-digit token (unambiguous vs. wind's
+    trailing KT/MPS/KMH and cloud's letters+3-digits shape). CAVOK implies
+    unrestricted vis/ceiling. A full-state string with neither a vis token
+    nor CAVOK/NSC is ambiguous (real TAFs always state one) and defaults to
+    YELLOW rather than silently passing as GREEN.
+    """
+    if _WX_RED_RE.search(text):
+        return "RED"
+
+    toks = text.split()
+    has_cavok = "CAVOK" in toks or "NSC" in toks
+    vis_m, ceiling_ft = _vis_and_ceiling(toks)
+
+    if vis_m is None and ceiling_ft is None and not has_cavok:
+        return "YELLOW"
+
+    return _tier_from_vis_ceiling(vis_m, ceiling_ft)
+
+
+def _tier_for_partial_text(text):
+    """Classify a partial diff-group (TEMPO/PROB/an upcoming overlay) that
+    only restates what's temporarily changing.
+
+    Unlike _tier_for_text, a missing vis/ceiling token here is not ambiguous
+    — TAF convention omits elements that aren't changing (e.g. a wind-only
+    TEMPO carries no vis/cloud restriction of its own) — so it scores GREEN
+    (neutral), not YELLOW. A phenomena override still forces RED.
+    """
+    if _WX_RED_RE.search(text):
+        return "RED"
+
+    vis_m, ceiling_ft = _vis_and_ceiling(text.split())
+    return _tier_from_vis_ceiling(vis_m, ceiling_ft)
+
+
+def _classify_wx_tier(taf_base, becmg_in_progress, active_overlays):
+    """Worst-case severity tier for an airport at ref_dt.
+
+    taf_base holds at ref_dt (already folded by condense_taf) and is scored
+    at full severity. becmg_in_progress is also a folded full-state string,
+    but the airport is mid-transition when ref_dt falls inside it, so it's
+    capped at YELLOW and forces a YELLOW floor regardless of either
+    end-state. active_overlays are raw TEMPO/PROB/upcoming-FM diff-groups —
+    not certain/current at ref_dt, and not full-state — so they're scored
+    with _tier_for_partial_text and likewise capped at YELLOW.
+    """
+    tier = _tier_for_text(taf_base) if taf_base else "YELLOW"
+
+    if becmg_in_progress:
+        tier = _worse_tier(tier, "YELLOW")
+        tier = _worse_tier(tier, _cap_at_yellow(_tier_for_text(becmg_in_progress["text"])))
+
+    for ov in active_overlays:
+        tier = _worse_tier(tier, _cap_at_yellow(_tier_for_partial_text(ov["text"])))
+
+    return tier
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -310,6 +417,7 @@ def main():
         taf_base, becmg_prog, active_overlays = None, None, []
         if d["taf_raw"]:
             taf_base, becmg_prog, active_overlays = condense_taf(d["taf_raw"], ref_dt)
+        wx_tier = _classify_wx_tier(taf_base, becmg_prog, active_overlays)
 
         out.append({
             "icao": icao,
@@ -326,6 +434,7 @@ def main():
             "taf_base": taf_base,
             "becmg_in_progress": becmg_prog,
             "active_overlays": active_overlays,
+            "wx_tier": wx_tier,
         })
 
     os.makedirs(os.path.dirname(OUT_JSON), exist_ok=True)

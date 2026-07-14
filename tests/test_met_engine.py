@@ -6,7 +6,13 @@ arithmetic used to get wrong.
 """
 from datetime import datetime, timezone
 
-from met_engine import condense_taf, _fold_conditions, _is_pure_wind_change
+from met_engine import (
+    condense_taf,
+    _fold_conditions,
+    _is_pure_wind_change,
+    _classify_wx_tier,
+    _tier_for_text,
+)
 
 
 def _dt(y, mo, d, h, mi=0):
@@ -167,3 +173,64 @@ class TestNoGroups:
         base, becmg, overlays = condense_taf(BASE_TAF, _dt(2026, 6, 20, 15, 0))
         assert base == "20010KT 9999 FEW020"
         assert becmg is None and overlays == []
+
+
+class TestWxTierFixtureAnchors:
+    """Regression anchors against the validated TG921 fixture rows (CLAUDE.md §2)."""
+
+    def test_eddf_green(self):
+        # 23007KT 9999 SCT040 — vis 9999, SCT never counts as a ceiling.
+        assert _classify_wx_tier("23007KT 9999 SCT040", None, []) == "GREEN"
+
+    def test_opla_yellow(self):
+        # 26005KT 4000 FU SCT100 — vis 4000 falls in the 1600-4999 band.
+        assert _classify_wx_tier("26005KT 4000 FU SCT100", None, []) == "YELLOW"
+
+    def test_opkc_yellow_becmg_in_progress(self):
+        # Base alone is GREEN-boundary (vis 5000, ceiling 2000) but the
+        # in-progress BECMG forces a YELLOW floor regardless of end-state.
+        base = "24012G22KT 5000 HZ BKN020"
+        becmg = {"text": "25006G16KT 4000 HZ BKN020", "window": "2018Z-2020Z"}
+        assert _classify_wx_tier(base, becmg, []) == "YELLOW"
+
+    def test_ltcc_yellow_second_becmg_in_progress(self):
+        base = "22006KT CAVOK"
+        becmg = {"text": "30006KT CAVOK", "window": "2011Z-2014Z"}
+        assert _classify_wx_tier(base, becmg, []) == "YELLOW"
+
+    def test_vtbs_green_no_overlays(self):
+        # 24008KT 9999 SCT020, both TEMPOs fall outside the +-1h window.
+        assert _classify_wx_tier("24008KT 9999 SCT020", None, []) == "GREEN"
+
+
+class TestWxTierSynthetic:
+    def test_baseline_tsra_is_red(self):
+        assert _tier_for_text("24010KT 3000 TSRA BKN008") == "RED"
+        assert _classify_wx_tier("24010KT 3000 TSRA BKN008", None, []) == "RED"
+
+    def test_tsra_only_in_prob_overlay_is_capped_to_yellow(self):
+        base = "VRB04KT CAVOK"
+        overlays = [{"type": "PROB30 TEMPO", "text": "27015G35KT TSRA", "window": "2014Z-2018Z"}]
+        assert _classify_wx_tier(base, None, overlays) == "YELLOW"
+
+    def test_low_visibility_is_red(self):
+        # LVO-class visibility.
+        assert _tier_for_text("22005KT 0800 FG") == "RED"
+
+    def test_cavok_is_green(self):
+        assert _tier_for_text("15013KT CAVOK") == "GREEN"
+
+    def test_low_ceiling_is_red(self):
+        assert _tier_for_text("18010KT 9999 BKN003") == "RED"
+
+    def test_ambiguous_baseline_defaults_yellow(self):
+        # Full-state text with no vis token, no CAVOK/NSC — flag for review.
+        assert _tier_for_text("TX33/2013Z TN21/2103Z") == "YELLOW"
+
+    def test_wind_only_overlay_is_not_ambiguous(self):
+        # A TEMPO that only restates wind (e.g. VHHH "TEMPO 27010KT") means
+        # vis/cloud are unchanged from baseline per TAF convention — it must
+        # not drag a GREEN baseline up to YELLOW just for lacking a vis token.
+        base = "12010KT 9999 FEW015 SCT025"
+        overlays = [{"type": "TEMPO", "text": "27010KT", "window": "3004Z-3009Z"}]
+        assert _classify_wx_tier(base, None, overlays) == "GREEN"

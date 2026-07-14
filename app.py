@@ -251,6 +251,7 @@ def _merge_airports_legs(leg_airports_list):
                 "taf_base":          ap.get("taf_base"),
                 "becmg_in_progress": ap.get("becmg_in_progress"),
                 "active_overlays":   ap.get("active_overlays", []),
+                "wx_tier":           ap.get("wx_tier", "YELLOW"),
             }
             if icao not in merged:
                 merged[icao] = {
