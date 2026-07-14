@@ -277,6 +277,22 @@
     }
     body.panel-open #status { right: calc(var(--panel-w) + 16px); }
 
+    /* ── Dropped-airport warning banner ── */
+    #warnBanner {
+      display: none;
+      position: fixed; top: 0; left: 0; right: 0; z-index: 2000;
+      background: #3a2a00; color: #ffc060;
+      font-size: 0.82rem; padding: 8px 16px;
+      align-items: center; gap: 10px;
+      border-bottom: 1px solid #5a4200;
+    }
+    #warnBanner.show { display: flex; }
+    #warnBanner .warn-text { flex: 1; }
+    #warnBanner .warn-close {
+      cursor: pointer; touch-action: manipulation;
+      padding: 4px 10px; color: #ffc060; font-weight: 700;
+    }
+
     /* ── Leaflet popup (used for DEP/DEST) ── */
     .leaflet-popup-content-wrapper {
       background: #1e2340; border: 1px solid #3a4060;
@@ -350,6 +366,11 @@
   </style>
 </head>
 <body>
+
+<div id="warnBanner">
+  <span class="warn-text" id="warnBannerText"></span>
+  <span class="warn-close" onclick="document.getElementById('warnBanner').classList.remove('show')">✕</span>
+</div>
 
 <div id="header">
   <h1 id="hdr-title">Preflight Briefing</h1>
@@ -981,6 +1002,15 @@ function renderHeaderAirportBtns(airports, legs) {
     actions.insertBefore(btn, flightBtn);
   });
 }
+
+// ── Dropped-airport warnings (e.g. MET PDF airport with no known coords) ───
+fetch(DATA("warnings.json")).then(r => r.ok ? r.json() : []).then(warnings => {
+  if (!warnings || !warnings.length) return;
+  const banner = document.getElementById('warnBanner');
+  document.getElementById('warnBannerText').textContent =
+    `⚠ ${warnings.length} airport${warnings.length > 1 ? 's' : ''} could not be shown: ${warnings.join('; ')}`;
+  banner.classList.add('show');
+}).catch(() => {});
 
 // ── Main data loading ──────────────────────────────────────────────────────
 Promise.all([

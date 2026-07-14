@@ -584,6 +584,7 @@ def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
             # ── Step 3: MET engine per leg ────────────────────────────────────
             import met_engine
             leg_airports_list = []
+            met_warnings = []
             for ld in leg_data:
                 _progress(f"[G{g_num}/L{ld['local_idx']}] Processing MET…")
                 tmp = os.path.join(group_dir, f"_airports_leg_{ld['local_idx']}.json")
@@ -593,11 +594,15 @@ def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
                 met_engine.TAKEOFF_UTC = ld["takeoff_utc"]
                 met_engine.main()
                 if ld["local_idx"] == 1:  # same MET PDF every leg — warn once
-                    for w in met_engine.WARNINGS:
+                    met_warnings = list(met_engine.WARNINGS)
+                    for w in met_warnings:
                         _progress(f"  WARN: {w}")
                 with open(tmp) as f:
                     leg_airports_list.append(json.load(f))
                 os.remove(tmp)
+
+            with open(os.path.join(group_dir, "warnings.json"), "w") as f:
+                json.dump(met_warnings, f, indent=2)
 
             # ── Step 4: Merge airports into multi-leg schema ──────────────────
             airports = _merge_airports_legs(leg_airports_list)
