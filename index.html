@@ -12,6 +12,11 @@
     * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     body { font-family: -apple-system, sans-serif; background: #1a1a2e; color: #eee; }
 
+    :root { --panel-w: 440px; }
+    @media (max-width: 900px) {
+      :root { --panel-w: min(75vw, 560px); }
+    }
+
     /* ── Header ── */
     #header {
       position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
@@ -30,15 +35,15 @@
       right: 0;
       transition: right 0.25s ease;
     }
-    body.panel-open #map { right: 380px; }
+    body.panel-open #map { right: var(--panel-w); }
 
     .leaflet-tile { filter: brightness(0.85) saturate(0.7); }
 
     /* ── Weather panel ── */
     #panel {
       position: fixed;
-      top: 58px; right: -380px; bottom: 0;
-      width: 380px;
+      top: 58px; right: calc(-1 * var(--panel-w)); bottom: 0;
+      width: var(--panel-w);
       background: #12132a;
       border-left: 1px solid #2a2d50;
       transition: right 0.25s ease;
@@ -66,13 +71,13 @@
       border: 1px solid #2a2d50;
       border-radius: 7px;
       color: #a0c8ff;
-      font-size: 0.82rem;
+      font-size: 0.95rem;
       font-weight: 600;
       letter-spacing: 0.03em;
-      padding: 7px 13px;
+      padding: 10px 16px;
       cursor: pointer;
       touch-action: manipulation;
-      max-width: 155px;
+      max-width: 45%;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -93,31 +98,31 @@
     .panel-close:active { background: #252860; }
 
     .panel-head {
-      padding: 20px 18px 14px;
+      padding: 22px 20px 16px;
       border-bottom: 1px solid #1e2248;
     }
     .panel-icao {
-      font-size: 1.4rem; font-weight: 700;
+      font-size: 1.55rem; font-weight: 700;
       color: #a0c8ff; letter-spacing: 0.04em;
     }
-    .panel-name { font-size: 0.9rem; color: #889; margin-top: 4px; }
-    .panel-ref  { font-size: 0.82rem; color: #667; margin-top: 8px; }
+    .panel-name { font-size: 1rem; color: #889; margin-top: 4px; }
+    .panel-ref  { font-size: 0.9rem; color: #667; margin-top: 8px; }
 
-    .panel-section { padding: 14px 18px; border-bottom: 1px solid #1a1d3a; }
+    .panel-section { padding: 16px 20px; border-bottom: 1px solid #1a1d3a; }
     .panel-label {
-      font-size: 0.7rem; font-weight: 700;
+      font-size: 0.8rem; font-weight: 700;
       letter-spacing: 0.1em; color: #667;
       text-transform: uppercase; margin-bottom: 7px;
     }
     .panel-value {
       font-family: 'SF Mono', 'Fira Mono', monospace;
-      font-size: 0.85rem; color: #c8d8f0;
+      font-size: 1rem; color: #c8d8f0;
       line-height: 1.55; white-space: pre-wrap; word-break: break-all;
     }
 
     .badge {
       display: inline-block;
-      font-size: 0.65rem; font-weight: 700;
+      font-size: 0.75rem; font-weight: 700;
       letter-spacing: 0.08em; padding: 3px 8px;
       border-radius: 4px; margin-bottom: 6px;
       text-transform: uppercase;
@@ -125,7 +130,7 @@
     .badge-becmg  { background: #1a3a5a; color: #60b0ff; }
     .badge-tempo  { background: #3a2a10; color: #ffb040; }
     .badge-prob   { background: #2a1a3a; color: #c080ff; }
-    .badge-window { font-size: 0.72rem; color: #778; margin-left: 6px; }
+    .badge-window { font-size: 0.8rem; color: #778; margin-left: 6px; }
 
     /* NOTAM tier badges */
     .badge-t1 { background: #4a1010; color: #ff8080; }
@@ -133,7 +138,7 @@
     .badge-t3 { background: #1e1e2e; color: #667; }
 
     .notam-row {
-      padding: 9px 0;
+      padding: 11px 0;
       border-bottom: 1px solid #191c38;
     }
     .notam-row:last-child { border-bottom: none; }
@@ -141,14 +146,14 @@
       display: flex; align-items: baseline; gap: 6px;
       flex-wrap: wrap; margin-bottom: 4px;
     }
-    .notam-id { font-size: 0.7rem; color: #667; font-family: monospace; }
-    .notam-window { font-size: 0.68rem; color: #667; }
+    .notam-id { font-size: 0.8rem; color: #667; font-family: monospace; }
+    .notam-window { font-size: 0.78rem; color: #667; }
     .notam-body {
-      font-size: 0.82rem; color: #b8c8e0;
+      font-size: 0.95rem; color: #b8c8e0;
       line-height: 1.5;
     }
 
-    .no-data { font-size: 0.82rem; color: #445; font-style: italic; }
+    .no-data { font-size: 0.9rem; color: #445; font-style: italic; }
 
     /* Runway chips in panel header */
     .rwy-chip {
@@ -157,10 +162,10 @@
       border-radius: 5px; padding: 2px 7px;
       margin: 2px 4px 2px 0;
       font-family: 'SF Mono', 'Fira Mono', monospace;
-      font-size: 0.78rem; white-space: nowrap;
+      font-size: 0.88rem; white-space: nowrap;
     }
     .rwy-name { color: #8ec8ff; }
-    .rwy-len  { color: #4a6a8a; font-size: 0.72rem; }
+    .rwy-len  { color: #4a6a8a; font-size: 0.8rem; }
     .rwy-chip[data-tier="1"] {
       border-color: #ff8080;
       box-shadow: 0 0 7px rgba(255,128,128,0.40);
@@ -181,13 +186,13 @@
     .notam-filter-clear {
       cursor: pointer; color: #60a8ff;
       font-weight: normal; text-transform: none;
-      letter-spacing: 0; margin-left: 6px; font-size: 0.68rem;
+      letter-spacing: 0; margin-left: 6px; font-size: 0.78rem;
     }
 
     /* L1/L2 leg chips in unified NOTAM block */
     .leg-chip {
       display: inline-block;
-      font-size: 0.6rem; font-weight: 700;
+      font-size: 0.7rem; font-weight: 700;
       letter-spacing: 0.05em; padding: 2px 5px;
       border-radius: 3px; margin-left: 3px;
       text-transform: uppercase; vertical-align: middle;
@@ -198,7 +203,7 @@
     .taf-clickable:hover { text-decoration: underline dotted #6e7681; }
     .taf-expand-block {
       font-family: ui-monospace, SFMono-Regular, monospace;
-      font-size: 0.72rem; color: #8b949e;
+      font-size: 0.82rem; color: #8b949e;
       background: #0d1117; border: 1px solid #30363d;
       border-radius: 4px; padding: 6px 8px;
       margin-top: 5px; word-break: break-all; white-space: pre-wrap;
@@ -207,7 +212,7 @@
     .notam-clickable:hover { text-decoration: underline dotted #6e7681; }
     .notam-expand-block {
       font-family: ui-monospace, SFMono-Regular, monospace;
-      font-size: 0.72rem; color: #8b949e;
+      font-size: 0.82rem; color: #8b949e;
       background: #0d1117; border: 1px solid #30363d;
       border-radius: 4px; padding: 6px 8px;
       margin-top: 5px; word-break: break-all; white-space: pre-wrap;
@@ -215,7 +220,7 @@
 
     /* 44px min-height touch target for "show N more" */
     .t3-expand {
-      font-size: 0.78rem; color: #556; cursor: pointer; touch-action: manipulation;
+      font-size: 0.88rem; color: #556; cursor: pointer; touch-action: manipulation;
       min-height: 44px; display: flex; align-items: center; justify-content: center;
       border-top: 1px solid #191c38;
     }
@@ -230,7 +235,7 @@
     .ap-btn {
       background: #1a1c3a; border: 1px solid #2a2d50;
       border-radius: 6px; padding: 6px 10px;
-      font-size: 0.75rem; font-weight: 700;
+      font-size: 0.82rem; font-weight: 700;
       letter-spacing: 0.1em;
       cursor: pointer; touch-action: manipulation;
       white-space: nowrap;
@@ -240,7 +245,7 @@
     #flightBtn {
       background: #1a1c3a; border: 1px solid #2a2d50;
       border-radius: 6px; padding: 6px 14px;
-      font-size: 0.75rem; font-weight: 700;
+      font-size: 0.82rem; font-weight: 700;
       letter-spacing: 0.1em; color: #a0c8ff;
       cursor: pointer; touch-action: manipulation;
       display: flex; align-items: center; gap: 6px;
@@ -258,7 +263,7 @@
 
     /* ── Flight-wide NOTAM filtered-out expand ── */
     .filtered-expand {
-      font-size: 0.75rem; color: #445; cursor: pointer; touch-action: manipulation;
+      font-size: 0.85rem; color: #445; cursor: pointer; touch-action: manipulation;
       min-height: 44px; display: flex; align-items: center; justify-content: center;
       border-top: 1px dotted #1a1d3a; margin-top: 6px;
     }
@@ -270,7 +275,7 @@
       background: rgba(20,20,40,0.90); padding: 7px 14px;
       border-radius: 6px; font-size: 0.78rem; color: #667;
     }
-    body.panel-open #status { right: 396px; }
+    body.panel-open #status { right: calc(var(--panel-w) + 16px); }
 
     /* ── Leaflet popup (used for DEP/DEST) ── */
     .leaflet-popup-content-wrapper {
@@ -290,7 +295,7 @@
       border-bottom: 1px solid #1a1d3a;
     }
     .leg-divider-label {
-      font-size: 0.7rem; font-weight: 700;
+      font-size: 0.8rem; font-weight: 700;
       letter-spacing: 0.12em; text-transform: uppercase;
       color: #5b9ef4;
     }
@@ -298,7 +303,7 @@
 
     /* ── Weather severity tag (panel) ── */
     .wx-tag {
-      font-size: 0.72rem;
+      font-size: 0.8rem;
       font-weight: 700;
       letter-spacing: 0.04em;
     }
@@ -415,12 +420,17 @@ function _updateNavBar() {
     (next ? `<button class="nav-btn nav-next" onclick="navigateTo(${_navIndex+1})">${label(next)} →</button>` : '<span></span>');
 }
 
+function focusAirport(lat, lon) {
+  map.flyTo([lat, lon], Math.max(map.getZoom(), 7),
+            { duration: 0.75, easeLinearity: 0.4 });
+}
+
 function navigateTo(idx) {
   const list = _navList();
   if (idx < 0 || idx >= list.length) return;
   const { data, type } = list[idx];
   openPanel(data, type);
-  map.flyTo([data.lat, data.lon], Math.max(map.getZoom(), 7));
+  focusAirport(data.lat, data.lon);
 }
 
 function openPanel(data, type = 'airport') {
@@ -967,7 +977,7 @@ function renderHeaderAirportBtns(airports, legs) {
     btn.textContent = ap.icao;
     btn.title       = ap.name || ap.icao;
     btn.style.color = color;
-    btn.onclick     = () => { openPanel(ap); map.flyTo([ap.lat, ap.lon], Math.max(map.getZoom(), 7)); };
+    btn.onclick     = () => { openPanel(ap); focusAirport(ap.lat, ap.lon); };
     actions.insertBefore(btn, flightBtn);
   });
 }
