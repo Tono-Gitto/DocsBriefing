@@ -524,6 +524,43 @@ def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeo
         json.dump(general_sections, f, indent=2)
 
 
+# ── Source Pane: page images + click-to-highlight anchors ────────────────────
+
+def _run_source_pane_step(notam_path, group_dirs):
+    """Render the NOTAM PDF's pages and compute per-NOTAM highlight anchors, once
+    per run (the NOTAM PDF is shared across groups). Writes notam_page_NNN.png +
+    notam_anchors.json into group_dirs[0], then hard-links the images (falling
+    back to a copy) and duplicates the JSON into every other group dir.
+
+    Caller wraps this in try/except — a failure here must never fail the run;
+    the Source Pane is simply unavailable.
+    """
+    import notam_anchors
+
+    primary_dir = group_dirs[0]
+    n_pages = notam_anchors.render_pages(notam_path, primary_dir)
+    anchors, page_sizes = notam_anchors.extract_anchors(notam_path)
+
+    payload = {
+        "pages": n_pages,
+        "page_sizes": [list(s) for s in page_sizes],
+        "anchors": anchors,
+    }
+    with open(os.path.join(primary_dir, "notam_anchors.json"), "w") as f:
+        json.dump(payload, f)
+
+    for group_dir in group_dirs[1:]:
+        with open(os.path.join(group_dir, "notam_anchors.json"), "w") as f:
+            json.dump(payload, f)
+        for i in range(1, n_pages + 1):
+            name = f"notam_page_{i:03d}.png"
+            src, dst = os.path.join(primary_dir, name), os.path.join(group_dir, name)
+            try:
+                os.link(src, dst)
+            except OSError:
+                shutil.copy(src, dst)
+
+
 # ── Pipeline background thread ────────────────────────────────────────────────
 
 def _progress(msg):
@@ -542,10 +579,12 @@ def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
     if leg_count > 2:
         group_legs[2] = ofp_paths[half:]
 
+    group_dirs = []
     try:
         for g_num, group_ofps in group_legs.items():
             group_dir = os.path.join(RUNS_DIR, run_id, str(g_num))
             os.makedirs(group_dir, exist_ok=True)
+            group_dirs.append(group_dir)
 
             # ── Step 1: OFP constants + flight info per leg ──────────────────
             leg_data = []
@@ -620,6 +659,13 @@ def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
                 json.dump(fi_out, f, indent=2)
 
             _progress(f"[G{g_num}] Complete.")
+
+        _progress("Rendering source document for click-to-highlight…")
+        try:
+            _run_source_pane_step(notam_path, group_dirs)
+            _progress("Source document ready.")
+        except Exception as exc:
+            _progress(f"⚠ source-document rendering failed — source pane unavailable ({type(exc).__name__})")
 
         with _lock:
             _current_run["status"] = "done"

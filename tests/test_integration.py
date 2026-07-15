@@ -73,17 +73,19 @@ class TestTG921METValidation:
         assert ap["active_overlays"] == []
 
 
+@pytest.fixture(scope="module")
+def notam_db():
+    """Shared across TestTG921NOTAMValidation and TestNotamAnchors — one PDF pass."""
+    import sys
+    sys.path.insert(0, ROOT)
+    from notam_engine import parse_notam_pdf
+    db, _, _ = parse_notam_pdf(FIXTURE_NOTAM)
+    return db
+
+
 @pytest.mark.integration
 class TestTG921NOTAMValidation:
     """Validate NOTAM parse against TG921_NOTAM.pdf (no API key needed)."""
-
-    @pytest.fixture(scope="class")
-    def notam_db(self):
-        import sys
-        sys.path.insert(0, ROOT)
-        from notam_engine import parse_notam_pdf
-        db, _, _ = parse_notam_pdf(FIXTURE_NOTAM)
-        return db
 
     def test_vtbs_notams_present(self, notam_db):
         assert "VTBS" in notam_db
@@ -97,3 +99,61 @@ class TestTG921NOTAMValidation:
         for icao, notams in notam_db.items():
             for n in notams:
                 assert n["tier"] in (1, 2, 3), f"{icao}: unexpected tier {n['tier']}"
+
+
+@pytest.mark.integration
+class TestNotamAnchors:
+    """Validate notam_anchors.py (Source Pane click-to-highlight) against TG921_NOTAM.pdf.
+
+    Position-aware companion pass to parse_notam_pdf() — see notam_anchors.py
+    and docs/adr/0001-page-images-and-parse-time-anchors.md.
+    """
+
+    @pytest.fixture(scope="class")
+    def parsed(self):
+        import sys
+        sys.path.insert(0, ROOT)
+        from notam_anchors import extract_anchors
+        anchors, page_sizes = extract_anchors(FIXTURE_NOTAM)
+        return anchors, page_sizes
+
+    def test_known_airport_notam_page(self, parsed):
+        anchors, _ = parsed
+        rects = anchors["EDDF|EDDZA3149/26"]
+        assert [r["page"] for r in rects] == [4]
+
+    def test_known_fir_and_general_ids_present(self, parsed):
+        anchors, _ = parsed
+        assert "VTBS|VTBDC3295/26" in anchors
+        assert anchors["VTBS|VTBDC3295/26"][0]["page"] == 7
+
+    def test_page_break_notam_yields_multiple_rects(self, parsed):
+        # THA 00002/13 (GENERAL section) is long enough to span three pages
+        anchors, _ = parsed
+        rects = anchors["GENERAL|THA 00002/13"]
+        assert [r["page"] for r in rects] == [1, 2, 3]
+
+    def test_all_rects_normalized(self, parsed):
+        anchors, _ = parsed
+        for key, rects in anchors.items():
+            for r in rects:
+                assert 0 <= r["x0"] < r["x1"] <= 1, f"{key}: bad x range {r}"
+                assert 0 <= r["y0"] < r["y1"] <= 1, f"{key}: bad y range {r}"
+
+    def test_page_sizes_match_page_count(self, parsed):
+        anchors, page_sizes = parsed
+        max_page = max(r["page"] for rects in anchors.values() for r in rects)
+        assert len(page_sizes) >= max_page
+
+    def test_missing_id_absent_not_raised(self, parsed):
+        anchors, _ = parsed
+        assert "EDDF|NOSUCHNOTAM/99" not in anchors
+
+    def test_hit_rate_against_parsed_notams(self, notam_db, parsed):
+        # Cross-check against the real parser's airport NOTAMs (already parsed by
+        # TestTG921NOTAMValidation's notam_db fixture — no second PDF pass here).
+        anchors, _ = parsed
+        expected = {f"{icao}|{n['id']}" for icao, notams in notam_db.items() for n in notams}
+        missing = expected - anchors.keys()
+        hit_rate = (len(expected) - len(missing)) / len(expected)
+        assert hit_rate >= 0.95, f"anchor hit rate {hit_rate:.1%} below 95% target; missing: {sorted(missing)[:10]}"
