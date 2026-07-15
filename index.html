@@ -12,9 +12,18 @@
     * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     body { font-family: -apple-system, sans-serif; background: #1a1a2e; color: #eee; }
 
-    :root { --panel-w: 440px; }
+    :root { --panel-w: 440px; --src-w: 50vw; }
     @media (max-width: 900px) {
       :root { --panel-w: min(75vw, 560px); }
+      /* Narrow viewports: Source Pane stacks above the map instead of beside it */
+      #srcPane {
+        left: 0; right: 0; width: auto;
+        top: 58px; bottom: auto; height: 50vh;
+        border-right: none; border-bottom: 1px solid #2a2d50;
+        transform: translateY(-100%);
+      }
+      body.src-open #srcPane { transform: translateY(0); }
+      body.src-open #map { left: 0; top: calc(58px + 50vh); }
     }
 
     /* ── Header ── */
@@ -33,9 +42,10 @@
       position: fixed;
       top: 58px; left: 0; bottom: 0;
       right: 0;
-      transition: right 0.25s ease;
+      transition: right 0.25s ease, left 0.25s ease, top 0.25s ease;
     }
     body.panel-open #map { right: var(--panel-w); }
+    body.src-open   #map { left: var(--src-w); }
 
     .leaflet-tile { filter: brightness(0.85) saturate(0.7); }
 
@@ -84,6 +94,56 @@
     }
     .nav-btn:hover  { background: #22254a; border-color: #404880; }
     .nav-btn:active { background: #2a2e58; }
+
+    /* ── Source Pane (original NOTAM PDF, click-to-highlight) ── */
+    #srcPane {
+      position: fixed;
+      top: 58px; left: 0; bottom: 0;
+      width: var(--src-w);
+      background: #0d0e1c;
+      border-right: 1px solid #2a2d50;
+      transform: translateX(-100%);
+      transition: transform 0.25s ease;
+      z-index: 850;
+      display: flex; flex-direction: column;
+    }
+    body.src-open #srcPane { transform: translateX(0); }
+    #srcPane-header {
+      flex-shrink: 0;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 14px;
+      border-bottom: 1px solid #1e2248;
+      font-size: 0.8rem; font-weight: 700; letter-spacing: 0.1em;
+      color: #778; text-transform: uppercase;
+    }
+    #srcPane-close {
+      cursor: pointer; touch-action: manipulation;
+      width: 32px; height: 32px;
+      display: flex; align-items: center; justify-content: center;
+      color: #778; border-radius: 6px;
+    }
+    #srcPane-close:hover { color: #aac; background: #1e2048; }
+    #srcPageStack {
+      flex: 1; overflow-y: auto; overscroll-behavior: contain;
+      padding: 10px; display: flex; flex-direction: column; gap: 10px;
+    }
+    .src-page { position: relative; width: 100%; background: #fff; }
+    .src-page img { display: block; width: 100%; height: auto; }
+    .src-highlight {
+      position: absolute;
+      border: 3px solid #4a7cf0;
+      border-radius: 6px;
+      box-shadow: 0 0 10px rgba(74,124,240,0.55);
+      pointer-events: none;
+    }
+
+    /* Passive indicator + selected state on NOTAM rows linked to the source doc */
+    .src-dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      background: #4a7cf0; margin-left: 6px; vertical-align: middle;
+    }
+    .notam-row[data-anchor-key] { cursor: pointer; }
+    .notam-row.src-selected { background: rgba(74,124,240,0.10); }
 
     /* 44×44 touch target for close button */
     .panel-close {
@@ -242,6 +302,17 @@
     }
     .ap-btn:hover  { background: #22254a; border-color: #4a5080; }
     .ap-btn:active { background: #2a2e58; }
+    #docBtn {
+      background: #1a1c3a; border: 1px solid #2a2d50;
+      border-radius: 6px; padding: 6px 14px;
+      font-size: 0.82rem; font-weight: 700;
+      letter-spacing: 0.1em; color: #a0c8ff;
+      cursor: pointer; touch-action: manipulation;
+      white-space: nowrap;
+    }
+    #docBtn:hover  { background: #22254a; border-color: #4a5080; }
+    #docBtn:active { background: #2a2e58; }
+    #docBtn.src-active { background: #1a2e4a; border-color: #4a7cf0; }
     #flightBtn {
       background: #1a1c3a; border: 1px solid #2a2d50;
       border-radius: 6px; padding: 6px 14px;
@@ -376,8 +447,17 @@
   <h1 id="hdr-title">Preflight Briefing</h1>
   <span id="hdr-sub"></span>
   <div id="header-actions">
+    <button id="docBtn" style="display:none" onclick="toggleSrcPane()">DOC</button>
     <button id="flightBtn" onclick="openFlightPanel()">FLIGHT <span id="flightBadge"></span></button>
   </div>
+</div>
+
+<div id="srcPane">
+  <div id="srcPane-header">
+    <span>NOTAM — Original</span>
+    <span id="srcPane-close" onclick="closeSrcPane()">✕</span>
+  </div>
+  <div id="srcPageStack"></div>
 </div>
 
 <div id="map"></div>
@@ -410,6 +490,9 @@ let _activeRwyFilter = null;
 let _navAirports = [];
 let _navFirs     = [];
 let _navIndex    = -1;
+
+// ── Source Pane (original NOTAM PDF, click-to-highlight) ────────────────────
+let _srcPane = { open: false, loaded: false, activeKey: null, anchors: null, pageSizes: [], pages: 0 };
 
 const map = L.map("map", { center: [30, 60], zoom: 3 });
 
@@ -481,6 +564,81 @@ function esc(s) {
   return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
           .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 }
+
+// ── Source Pane: lazy page stack, open/close, click-to-highlight ────────────
+function _buildSrcPaneDom() {
+  if (_srcPane.loaded) return;
+  let html = '';
+  for (let i = 1; i <= _srcPane.pages; i++) {
+    const [pw, ph] = _srcPane.pageSizes[i - 1] || [595, 842];
+    const page = String(i).padStart(3, '0');
+    html += `<div class="src-page" id="src-page-${i}" style="aspect-ratio:${pw}/${ph}">
+      <img src="${DATA('notam_page_' + page + '.png')}" loading="lazy" alt="NOTAM page ${i}">
+    </div>`;
+  }
+  document.getElementById('srcPageStack').innerHTML = html;
+  _srcPane.loaded = true;
+}
+
+function openSrcPane() {
+  _buildSrcPaneDom();
+  _srcPane.open = true;
+  document.body.classList.add('src-open');
+  document.getElementById('docBtn')?.classList.add('src-active');
+  map.invalidateSize();
+}
+
+function closeSrcPane() {
+  _srcPane.open = false;
+  document.body.classList.remove('src-open');
+  document.getElementById('docBtn')?.classList.remove('src-active');
+  _clearSrcHighlight();
+  map.invalidateSize();
+}
+
+function toggleSrcPane() {
+  if (_srcPane.open) closeSrcPane(); else openSrcPane();
+}
+
+function _clearSrcHighlight() {
+  document.querySelectorAll('.src-highlight').forEach(el => el.remove());
+  document.querySelectorAll('.notam-row.src-selected').forEach(el => el.classList.remove('src-selected'));
+}
+
+// Tapping any NOTAM row that carries a data-anchor-key opens the Source Pane
+// (auto-opening it the first time) and draws a highlight over that NOTAM's
+// block in the original PDF page image.
+function showSourceAnchor(key, rowEl) {
+  const rects = _srcPane.anchors && _srcPane.anchors[key];
+  if (!rects || !rects.length) return;
+
+  openSrcPane();
+  _clearSrcHighlight();
+  if (rowEl) rowEl.classList.add('src-selected');
+  _srcPane.activeKey = key;
+
+  let firstEl = null;
+  rects.forEach(r => {
+    const pageEl = document.getElementById(`src-page-${r.page}`);
+    if (!pageEl) return;
+    const hl = document.createElement('div');
+    hl.className = 'src-highlight';
+    hl.style.left   = (r.x0 * 100) + '%';
+    hl.style.top    = (r.y0 * 100) + '%';
+    hl.style.width  = ((r.x1 - r.x0) * 100) + '%';
+    hl.style.height = ((r.y1 - r.y0) * 100) + '%';
+    pageEl.appendChild(hl);
+    if (!firstEl) firstEl = hl;
+  });
+  if (firstEl) firstEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+document.addEventListener('click', e => {
+  const row = e.target.closest('.notam-row[data-anchor-key]');
+  if (!row) return;
+  if (e.target.closest('.notam-clickable')) return;  // keep summary/body toggle separate (D5)
+  showSourceAnchor(row.dataset.anchorKey, row);
+});
 
 // ── Runway chips (built from union of notams across all legs) ───────────────
 function buildChips(runway_info, allNotams) {
@@ -610,7 +768,9 @@ function badgeClass(type) {
 // ── notamRow: renders a NOTAM row. legInfo is a number for single-leg rows
 //   (DOM id: notam-l<N>-<safeId>) or an array/null for unified multi-leg rows
 //   (DOM id: notam-u-<safeId>, with optional per-leg chips).
-function notamRow(n, legInfo) {
+//   anchorKey (optional) is "<owner>|<notam id>" — if it exists in the loaded
+//   Source Pane anchors, the row becomes clickable and gets a passive blue dot.
+function notamRow(n, legInfo, anchorKey) {
   const unified  = Array.isArray(legInfo);
   const tierClass = n.tier === 1 ? "badge-t1" : n.tier === 2 ? "badge-t2" : "badge-t3";
   const tierLabel = n.tier === 1 ? "T1" : n.tier === 2 ? "T2" : "T3";
@@ -623,11 +783,14 @@ function notamRow(n, legInfo) {
   const shown  = n.summary || n.body;
   const canExp = n.summary && n.body && n.summary !== n.body;
   if (canExp) _notamBody[safeId] = n.body;
-  let row = `<div class="notam-row" id="${domId}" data-notam-id="${safeId}">
+  const hasAnchor = !!(anchorKey && _srcPane.anchors && _srcPane.anchors[anchorKey]);
+  const anchorAttr = hasAnchor ? ` data-anchor-key="${esc(anchorKey)}"` : '';
+  let row = `<div class="notam-row" id="${domId}" data-notam-id="${safeId}"${anchorAttr}>
     <div class="notam-header">
       <span class="badge ${tierClass}">${tierLabel}</span>${chips}
       <span class="notam-id">${esc(n.id)}</span>`;
   if (win) row += `<span class="notam-window">${esc(win)}</span>`;
+  if (hasAnchor) row += `<span class="src-dot" title="View in source document"></span>`;
   row += `</div><div class="notam-body${canExp ? ' notam-clickable' : ''}"${
     canExp ? ` onclick="toggleNotam(this,'${safeId}')"` : ''
   }>${esc(shown)}</div></div>`;
@@ -718,7 +881,7 @@ function buildPanel(ap) {
     if (notams.length === 0) {
       html += `<div class="no-data">No active NOTAMs at ref time</div>`;
     } else {
-      notams.forEach(n => { html += notamRow(n, legs[0].leg); });
+      notams.forEach(n => { html += notamRow(n, legs[0].leg, `${ap.icao}|${n.id}`); });
     }
   } else {
     // Deduplicate by NOTAM ID across legs, sort by tier
@@ -735,7 +898,7 @@ function buildPanel(ap) {
       html += `<div class="no-data">No active NOTAMs at either ref time</div>`;
     } else {
       unified.forEach(({ notam: n, legNums }) => {
-        html += notamRow(n, legNums.length < legs.length ? legNums : null);
+        html += notamRow(n, legNums.length < legs.length ? legNums : null, `${ap.icao}|${n.id}`);
       });
     }
     // Per-leg notes for empty / not-in-brief
@@ -765,7 +928,7 @@ function buildFirPanel(f) {
   </div>`;
 
   if (!multiLeg) {
-    return html + buildFirNotamSection(legs[0]);
+    return html + buildFirNotamSection(legs[0], f.fir);
   }
 
   // Multi-leg: deduplicate by NOTAM ID, sort by tier
@@ -788,11 +951,11 @@ function buildFirPanel(f) {
     const t3   = unified.filter(u => u.notam.tier === 3);
 
     t1t2.forEach(({ notam: n, legNums }) => {
-      html += notamRow(n, legNums.length < legs.length ? legNums : null);
+      html += notamRow(n, legNums.length < legs.length ? legNums : null, `${f.fir}|${n.id}`);
     });
 
     t3.forEach(({ notam: n, legNums }) => {
-      html += notamRow(n, legNums.length < legs.length ? legNums : null);
+      html += notamRow(n, legNums.length < legs.length ? legNums : null, `${f.fir}|${n.id}`);
     });
 
     legs.forEach(leg => {
@@ -806,7 +969,7 @@ function buildFirPanel(f) {
   return html;
 }
 
-function buildFirNotamSection(leg) {
+function buildFirNotamSection(leg, firCode) {
   const notams = leg.notams || [];
   let html = `<div class="panel-section">
     <div class="panel-label">FIR NOTAMs active at ${esc(leg.ref_time)}</div>`;
@@ -818,9 +981,9 @@ function buildFirNotamSection(leg) {
   const t1t2 = notams.filter(n => n.tier < 3);
   const t3   = notams.filter(n => n.tier === 3);
 
-  t1t2.forEach(n => { html += notamRow(n, leg.leg); });
+  t1t2.forEach(n => { html += notamRow(n, leg.leg, `${firCode}|${n.id}`); });
 
-  t3.forEach(n => { html += notamRow(n, leg.leg); });
+  t3.forEach(n => { html += notamRow(n, leg.leg, `${firCode}|${n.id}`); });
 
   return html + `</div>`;
 }
@@ -851,14 +1014,14 @@ function buildFlightPanel(sections) {
     } else {
       const t1t2 = notams.filter(n => n.tier < 3);
       const t3   = notams.filter(n => n.tier === 3);
-      t1t2.forEach(n => { html += notamRow(n, 0); });
+      t1t2.forEach(n => { html += notamRow(n, 0, `${sec.key}|${n.id}`); });
       if (t3.length <= 5) {
-        t3.forEach(n => { html += notamRow(n, 0); });
+        t3.forEach(n => { html += notamRow(n, 0, `${sec.key}|${n.id}`); });
       } else {
-        t3.slice(0, 5).forEach(n => { html += notamRow(n, 0); });
+        t3.slice(0, 5).forEach(n => { html += notamRow(n, 0, `${sec.key}|${n.id}`); });
         const uid = `t3-gen-${sec.key.replace(/\s/g, '_')}`;
         html += `<div id="${uid}-more" style="display:none">`;
-        t3.slice(5).forEach(n => { html += notamRow(n, 0); });
+        t3.slice(5).forEach(n => { html += notamRow(n, 0, `${sec.key}|${n.id}`); });
         html += `</div>
           <div class="t3-expand" onclick="expandT3('${uid}', this)">
             show ${t3.length - 5} more T3 ▾
@@ -869,7 +1032,7 @@ function buildFlightPanel(sections) {
     if (filtered.length > 0) {
       const uid = `filt-gen-${sec.key.replace(/\s/g, '_')}`;
       html += `<div id="${uid}-more" style="display:none">`;
-      filtered.forEach(n => { html += notamRow(n, 0); });
+      filtered.forEach(n => { html += notamRow(n, 0, `${sec.key}|${n.id}`); });
       html += `</div>
         <div class="filtered-expand" onclick="expandT3('${uid}', this)">
           AI filtered out ${filtered.length} NOTAM${filtered.length > 1 ? 's' : ''} · tap to review ▾
@@ -1002,6 +1165,17 @@ function renderHeaderAirportBtns(airports, legs) {
     actions.insertBefore(btn, flightBtn);
   });
 }
+
+// ── Source Pane data (original NOTAM PDF pages + click-to-highlight anchors).
+//   Absent on legacy runs, the MVP demo, or if pipeline rendering failed —
+//   DOC button stays hidden and the feature is invisible (best-effort).
+fetch(DATA("notam_anchors.json")).then(r => r.ok ? r.json() : null).then(data => {
+  if (!data) return;
+  _srcPane.anchors    = data.anchors || {};
+  _srcPane.pageSizes  = data.page_sizes || [];
+  _srcPane.pages      = data.pages || 0;
+  document.getElementById("docBtn").style.display = "";
+}).catch(() => {});
 
 // ── Dropped-airport warnings (e.g. MET PDF airport with no known coords) ───
 fetch(DATA("warnings.json")).then(r => r.ok ? r.json() : []).then(warnings => {
