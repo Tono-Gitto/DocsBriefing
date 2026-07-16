@@ -137,11 +137,7 @@
       pointer-events: none;
     }
 
-    /* Passive indicator + selected state on NOTAM rows linked to the source doc */
-    .src-dot {
-      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-      background: #4a7cf0; margin-left: 6px; vertical-align: middle;
-    }
+    /* Selected state on NOTAM rows linked to the source doc */
     .notam-row[data-anchor-key] { cursor: pointer; }
     .notam-row.src-selected { background: rgba(74,124,240,0.10); }
 
@@ -268,16 +264,6 @@
       border-radius: 4px; padding: 6px 8px;
       margin-top: 5px; word-break: break-all; white-space: pre-wrap;
     }
-    .notam-clickable { cursor: pointer; }
-    .notam-clickable:hover { text-decoration: underline dotted #6e7681; }
-    .notam-expand-block {
-      font-family: ui-monospace, SFMono-Regular, monospace;
-      font-size: 0.82rem; color: #8b949e;
-      background: #0d1117; border: 1px solid #30363d;
-      border-radius: 4px; padding: 6px 8px;
-      margin-top: 5px; word-break: break-all; white-space: pre-wrap;
-    }
-
     /* 44px min-height touch target for "show N more" */
     .t3-expand {
       font-size: 0.88rem; color: #556; cursor: pointer; touch-action: manipulation;
@@ -636,7 +622,6 @@ function showSourceAnchor(key, rowEl) {
 document.addEventListener('click', e => {
   const row = e.target.closest('.notam-row[data-anchor-key]');
   if (!row) return;
-  if (e.target.closest('.notam-clickable')) return;  // keep summary/body toggle separate (D5)
   showSourceAnchor(row.dataset.anchorKey, row);
 });
 
@@ -727,7 +712,6 @@ function clearNotamFilter() {
 }
 
 const _tafRaw = {};
-const _notamBody = {};
 let _generalNotams = [];
 function toggleTaf(el, icao) {
   const next = el.nextElementSibling;
@@ -739,20 +723,6 @@ function toggleTaf(el, icao) {
   if (!raw) return;
   const block = document.createElement('div');
   block.className = 'taf-expand-block';
-  block.textContent = raw;
-  el.insertAdjacentElement('afterend', block);
-}
-
-function toggleNotam(el, safeId) {
-  const next = el.nextElementSibling;
-  if (next && next.classList.contains('notam-expand-block')) {
-    next.remove();
-    return;
-  }
-  const raw = _notamBody[safeId] || '';
-  if (!raw) return;
-  const block = document.createElement('div');
-  block.className = 'notam-expand-block';
   block.textContent = raw;
   el.insertAdjacentElement('afterend', block);
 }
@@ -781,8 +751,6 @@ function notamRow(n, legInfo, anchorKey) {
     ? legInfo.map(num => `<span class="leg-chip${num === 2 ? ' leg2' : ''}">L${num}</span>`).join('')
     : '';
   const shown  = n.summary || n.body;
-  const canExp = n.summary && n.body && n.summary !== n.body;
-  if (canExp) _notamBody[safeId] = n.body;
   const hasAnchor = !!(anchorKey && _srcPane.anchors && _srcPane.anchors[anchorKey]);
   const anchorAttr = hasAnchor ? ` data-anchor-key="${esc(anchorKey)}"` : '';
   let row = `<div class="notam-row" id="${domId}" data-notam-id="${safeId}"${anchorAttr}>
@@ -790,10 +758,7 @@ function notamRow(n, legInfo, anchorKey) {
       <span class="badge ${tierClass}">${tierLabel}</span>${chips}
       <span class="notam-id">${esc(n.id)}</span>`;
   if (win) row += `<span class="notam-window">${esc(win)}</span>`;
-  if (hasAnchor) row += `<span class="src-dot" title="View in source document"></span>`;
-  row += `</div><div class="notam-body${canExp ? ' notam-clickable' : ''}"${
-    canExp ? ` onclick="toggleNotam(this,'${safeId}')"` : ''
-  }>${esc(shown)}</div></div>`;
+  row += `</div><div class="notam-body">${esc(shown)}</div></div>`;
   return row;
 }
 
