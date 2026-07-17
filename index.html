@@ -198,6 +198,16 @@
       white-space: nowrap;
       pointer-events: none;
     }
+    /* Fills near the page's left margin flip the tag to the right side
+       instead — a left-anchored tag on a box that starts near x0=0 pushes
+       past the scrollable page container's left edge (x<0 is unreachable,
+       overflow-x:auto can't scroll negative) and gets clipped, most visibly
+       on wide merged tags like "L1+L2". */
+    .src-fill-tag-right {
+      left: 100%;
+      transform: translate(4px, -2px);
+      border-radius: 0 2px 2px 0;
+    }
 
     /* Narrow viewports: accordion — the expanded section fills the 50vh band;
        JS (_isNarrow / _setSectionCollapsed) enforces exactly one open. */
@@ -758,7 +768,8 @@ function _updateMetLegend(multiLeg) {
   el.innerHTML =
     `<span><span class="swatch" style="background:${ROUTE_COLORS[0]}"></span>L1</span>` +
     `<span><span class="swatch" style="background:${ROUTE_COLORS[1]}"></span>L2</span>` +
-    `<span>solid = at ETA, thin = ETA±1h</span>`;
+    `<span>solid = at ETA, thin = ETA±1h</span>` +
+    `<span>double ring = both legs</span>`;
   el.classList.add('show');
 }
 
@@ -773,19 +784,25 @@ function _unionRect(a, b) {
   return { page: a.page, y0: a.y0, y1: a.y1, x0: Math.min(a.x0, b.x0), x1: Math.max(a.x1, b.x1) };
 }
 
-function _appendMetFill(color, rect, extraCls, tag) {
+// colors is a single hex string, or [color1, color2] when this rect is shared
+// by more than one leg (see _drawMergedFills) — a second color draws as an
+// outer ring via box-shadow so both legs stay visible on one fill instead of
+// one leg's box fully occluding the other's.
+function _appendMetFill(colors, rect, extraCls, tag) {
   const pageEl = document.getElementById(`src-page-met-${rect.page}`);
   if (!pageEl) return;
+  const list = Array.isArray(colors) ? colors : [colors];
   const fill = document.createElement('div');
   fill.className = extraCls ? `src-fill ${extraCls}` : 'src-fill';
   _positionRect(fill, rect);
-  fill.style.background = _rgba(color, 0.32);
-  fill.style.border = `${extraCls === 'src-fill-base' ? 2 : 1}px solid ${color}`;
+  fill.style.background = _rgba(list[0], 0.32);
+  fill.style.border = `${extraCls === 'src-fill-base' ? 2 : 1}px solid ${list[0]}`;
+  if (list.length > 1) fill.style.boxShadow = `0 0 0 2px ${list[1]}`;
   if (tag) {
     const tagEl = document.createElement('span');
-    tagEl.className = 'src-fill-tag';
+    tagEl.className = rect.x0 < 0.05 ? 'src-fill-tag src-fill-tag-right' : 'src-fill-tag';
     tagEl.textContent = tag;
-    tagEl.style.background = color;
+    tagEl.style.background = list[0];
     tagEl.style.color = '#0d0e1c';
     fill.appendChild(tagEl);
   }
@@ -798,8 +815,16 @@ function _appendMetFill(color, rect, extraCls, tag) {
 // the same offset space (see met_engine.py taf_base_src, met_anchors.py
 // "words"). A token whose exact [s, s+t.length) span isn't in entry.words is
 // a graceful miss — draw nothing, never approximate (docs/adr/0001, 0002).
-function _drawMetBaselineFills(color, taps, words, multiLeg, legNum) {
-  if (!taps.length || !words.length) return;
+//
+// Returns fill entries {rect, leg, taggable} rather than drawing directly —
+// _drawMetEtaFills merges these across legs before drawing (see
+// _drawMergedFills) so two legs resolving to the identical rect (e.g. a quick
+// turnaround where nothing changed between both legs' ETAs) draw one shared
+// fill instead of the later leg's box fully hiding the earlier leg's. Only
+// the first merged rect per leg is taggable, matching this fill kind's
+// existing (pre-merge) convention of tagging just the first box per leg.
+function _resolveBaselineFillEntries(taps, words, legNum) {
+  if (!taps.length || !words.length) return [];
   const byStart = new Map(words.map(w => [w[0], w]));
 
   const resolved = [];
@@ -822,8 +847,36 @@ function _drawMetBaselineFills(color, taps, words, multiLeg, legNum) {
     }
   });
 
-  merged.forEach((m, i) => {
-    _appendMetFill(color, m.rect, 'src-fill-base', multiLeg && i === 0 ? `L${legNum}` : null);
+  return merged.map((m, i) => ({ rect: m.rect, leg: legNum, taggable: i === 0 }));
+}
+
+// Groups per-leg fill entries {rect, leg, taggable} by exact rect coordinates
+// (page + all four bounds) so legs whose ETA windows resolve to the identical
+// PDF rect draw ONE fill with a two-tone ring instead of stacking separate
+// same-position divs where the later leg always wins the draw order. Only
+// exact coordinate matches merge — never a nearby/approximate rect — since a
+// shared src_start or shared baseline token always resolves to the same
+// anchors-derived rect object by construction (met_anchors.json geometry is
+// keyed per-airport, not per-leg). Scoped to one fill category per call —
+// window fills and baseline fills are never merged with each other, since
+// their border styles intentionally mean different things (ETA±1h vs at-ETA).
+function _drawMergedFills(entries, extraCls, multiLeg) {
+  const seen = new Map();
+  const order = [];
+  entries.forEach(({ rect, leg, taggable }) => {
+    const key = `${rect.page}|${rect.x0}|${rect.y0}|${rect.x1}|${rect.y1}`;
+    let g = seen.get(key);
+    if (!g) { g = { rect, legs: [], taggableLegs: [] }; seen.set(key, g); order.push(g); }
+    if (!g.legs.includes(leg)) g.legs.push(leg);
+    if (taggable && !g.taggableLegs.includes(leg)) g.taggableLegs.push(leg);
+  });
+
+  order.forEach(g => {
+    const legsSorted = g.legs.slice().sort((a, b) => a - b);
+    const colors = legsSorted.map(n => ROUTE_COLORS[(n - 1) % ROUTE_COLORS.length]);
+    const taggedSorted = g.taggableLegs.slice().sort((a, b) => a - b);
+    const tag = multiLeg && taggedSorted.length ? taggedSorted.map(n => `L${n}`).join('+') : null;
+    _appendMetFill(colors, g.rect, extraCls, tag);
   });
 }
 
@@ -842,8 +895,11 @@ function _drawMetEtaFills(icao, entry) {
   const legs = _legsFor(ap);
   const multiLeg = legs.length > 1;
 
+  // Collect every leg's fill entries per category first, then merge — see
+  // _drawMergedFills for why this can't draw per-leg inline any more.
+  const windowEntries = [];
+  const baselineEntries = [];
   legs.forEach(leg => {
-    const color = ROUTE_COLORS[(leg.leg - 1) % ROUTE_COLORS.length];
     const spans = [];
     if (leg.becmg_in_progress && leg.becmg_in_progress.src_start != null) {
       spans.push(leg.becmg_in_progress.src_start);
@@ -855,11 +911,14 @@ function _drawMetEtaFills(icao, entry) {
     spans.forEach(srcStart => {
       const rects = groups[String(srcStart)];
       if (!rects) return;
-      rects.forEach(r => _appendMetFill(color, r, null, multiLeg ? `L${leg.leg}` : null));
+      rects.forEach(r => windowEntries.push({ rect: r, leg: leg.leg, taggable: true }));
     });
 
-    _drawMetBaselineFills(color, leg.taf_base_src || [], words, multiLeg, leg.leg);
+    baselineEntries.push(..._resolveBaselineFillEntries(leg.taf_base_src || [], words, leg.leg));
   });
+
+  _drawMergedFills(windowEntries, null, multiLeg);
+  _drawMergedFills(baselineEntries, 'src-fill-base', multiLeg);
 
   _updateMetLegend(multiLeg);
 }

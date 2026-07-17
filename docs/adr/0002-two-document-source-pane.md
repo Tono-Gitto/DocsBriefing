@@ -152,3 +152,45 @@ itself equal to it in tests.
 the ETA-window fills' 1px) — the two answer different questions ("what holds at ETA" vs. "what
 else is relevant within ETA±1h") and sharing one style would blur that distinction the same
 way sharing one highlight color blurs MET vs. NOTAM.
+
+## Addendum: Merged fills for shared timing (2026-07-17)
+
+"All legs' fills render simultaneously in the established leg colors with L1/L2 tags" (above)
+had a bug on quick turnarounds: when two legs' ETA windows resolved to the *exact same* raw TAF
+group or baseline token (common when nothing changes between the two legs' ETAs — same
+`src_start`/token span, same anchors-derived rect), both legs drew a separate, fully opaque,
+identically-positioned `<div>`. The later leg (always L2, since legs render in ascending order)
+painted directly over the earlier one, so a rect both legs cared about silently looked like it
+belonged to L2 alone — the opposite of what the fill is for.
+
+**Merge by exact rect equality, draw one fill with a two-tone frame.** `_drawMergedFills`
+groups a category's fill entries by `page + x0 + y0 + x1 + y1` — the literal condition that
+caused the bug, and the only one guaranteed exact by construction (a shared `src_start`/token
+always resolves to the same shared anchors geometry, never a merely-similar one). A rect used
+by more than one leg draws as a single fill: the lowest leg number's color as the solid border,
+the next leg's color as an outer `box-shadow` ring, tagged with every contributing leg joined
+(`"L1+L2"`) instead of just one. A rect used by only one leg is unaffected. Rejected: merging
+by the *semantic* key (`src_start` value / token span) instead of the resolved rect — it would
+have required two separate matching implementations (one for `groups` offsets, one for merged
+baseline spans) where rect equality needs exactly one, and it doesn't fix anything rect
+equality doesn't already fix, since the two keys never disagree given the shared-anchors
+invariant above.
+
+**Scoped per fill category, never across them.** Window fills (thin border, ETA±1h) and
+baseline fills (thick border, at-ETA) are deliberately styled to mean different things; a
+window-fill rect merging with a baseline-fill rect that happens to share coordinates would
+erase that distinction. `_drawMetEtaFills` calls `_drawMergedFills` once per category.
+
+**Tag density stays asymmetric across categories, unchanged by the merge.** Window fills tag
+every rect in a merged group; baseline fills tag only the group's first rect per leg that was
+already first before merging (`taggable`) — this predates the merge and wasn't the bug, so it
+was left alone rather than folded into one convention while touching the code anyway.
+
+**Follow-on: tag clipping on left-margin rects.** The wider combined tag (`"L1+L2"`, ~2.5× a
+single-leg tag) made a latent issue much more visible: tags anchor to the *left* of their box
+(`translate(-100%, …)`), and the MET Document Section's scroll container is `overflow-x: auto`
+— content can't scroll to negative x, so a tag pushed left of a rect near the page's left
+margin (`x0` near 0) was permanently clipped, not just offscreen-but-reachable. Fixed by
+flipping the tag to the box's right edge (`.src-fill-tag-right`) whenever `x0 < 0.05`; the
+right side can overflow the visible pane under `overflow-x: auto` but stays *reachable* by
+scrolling, which is why only the left side needed the flip.
