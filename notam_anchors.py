@@ -133,12 +133,12 @@ def extract_anchors(pdf_path):
     return anchors, page_sizes
 
 
-def render_pages(pdf_path, out_dir, resolution=144):
-    """Render every page of pdf_path to out_dir/notam_page_NNN.png (1-based, zero-padded 3).
+def render_pages(pdf_path, out_dir, resolution=144, prefix="notam_page"):
+    """Render every page of pdf_path to out_dir/<prefix>_NNN.png (1-based, zero-padded 3).
     Returns the page count."""
     os.makedirs(out_dir, exist_ok=True)
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages, start=1):
             img = page.to_image(resolution=resolution)
-            img.save(os.path.join(out_dir, f"notam_page_{i:03d}.png"))
+            img.save(os.path.join(out_dir, f"{prefix}_{i:03d}.png"))
         return len(pdf.pages)

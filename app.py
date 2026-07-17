@@ -526,39 +526,63 @@ def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeo
 
 # ── Source Pane: page images + click-to-highlight anchors ────────────────────
 
-def _run_source_pane_step(notam_path, group_dirs):
-    """Render the NOTAM PDF's pages and compute per-NOTAM highlight anchors, once
-    per run (the NOTAM PDF is shared across groups). Writes notam_page_NNN.png +
-    notam_anchors.json into group_dirs[0], then hard-links the images (falling
-    back to a copy) and duplicates the JSON into every other group dir.
-
-    Caller wraps this in try/except — a failure here must never fail the run;
-    the Source Pane is simply unavailable.
+def _render_source_document(pdf_path, extract_fn, prefix, json_name, group_dirs):
+    """Render one source document's pages and anchors once per run (shared across
+    groups), then hard-link (falling back to a copy) the images and duplicate the
+    JSON into every group dir beyond the primary. Shared by the NOTAM and MET
+    halves of _run_source_pane_step — each document is best-effort independently.
     """
-    import notam_anchors
+    import notam_anchors  # render_pages lives here regardless of which document
 
     primary_dir = group_dirs[0]
-    n_pages = notam_anchors.render_pages(notam_path, primary_dir)
-    anchors, page_sizes = notam_anchors.extract_anchors(notam_path)
+    n_pages = notam_anchors.render_pages(pdf_path, primary_dir, prefix=prefix)
+    anchors, page_sizes = extract_fn(pdf_path)
 
     payload = {
         "pages": n_pages,
         "page_sizes": [list(s) for s in page_sizes],
         "anchors": anchors,
     }
-    with open(os.path.join(primary_dir, "notam_anchors.json"), "w") as f:
+    with open(os.path.join(primary_dir, json_name), "w") as f:
         json.dump(payload, f)
 
     for group_dir in group_dirs[1:]:
-        with open(os.path.join(group_dir, "notam_anchors.json"), "w") as f:
+        with open(os.path.join(group_dir, json_name), "w") as f:
             json.dump(payload, f)
         for i in range(1, n_pages + 1):
-            name = f"notam_page_{i:03d}.png"
+            name = f"{prefix}_{i:03d}.png"
             src, dst = os.path.join(primary_dir, name), os.path.join(group_dir, name)
             try:
                 os.link(src, dst)
             except OSError:
                 shutil.copy(src, dst)
+
+
+def _run_source_pane_step(notam_path, met_path, group_dirs):
+    """Render both source documents' pages and compute click-to-highlight anchors,
+    once per run (both PDFs are shared across groups). Each document is rendered
+    independently, wrapped in its own try/except, so a MET rendering failure never
+    costs the NOTAM pane (or vice versa) — the Source Pane degrades one document
+    at a time, not all-or-nothing.
+    """
+    import notam_anchors
+
+    try:
+        _render_source_document(
+            notam_path, notam_anchors.extract_anchors, "notam_page",
+            "notam_anchors.json", group_dirs,
+        )
+    except Exception as exc:
+        _progress(f"⚠ NOTAM source-document rendering failed — NOTAM pane unavailable ({type(exc).__name__})")
+
+    try:
+        import met_anchors
+        _render_source_document(
+            met_path, met_anchors.extract_anchors, "met_page",
+            "met_anchors.json", group_dirs,
+        )
+    except Exception as exc:
+        _progress(f"⚠ MET source-document rendering failed — MET pane unavailable ({type(exc).__name__})")
 
 
 # ── Pipeline background thread ────────────────────────────────────────────────
@@ -660,10 +684,10 @@ def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
 
             _progress(f"[G{g_num}] Complete.")
 
-        _progress("Rendering source document for click-to-highlight…")
+        _progress("Rendering source documents for click-to-highlight…")
         try:
-            _run_source_pane_step(notam_path, group_dirs)
-            _progress("Source document ready.")
+            _run_source_pane_step(notam_path, met_path, group_dirs)
+            _progress("Source documents ready.")
         except Exception as exc:
             _progress(f"⚠ source-document rendering failed — source pane unavailable ({type(exc).__name__})")
 

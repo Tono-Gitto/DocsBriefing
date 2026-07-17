@@ -61,6 +61,36 @@ class TestFolding:
         assert becmg is not None and becmg["text"] == "30008KT 9999 FEW020"
 
 
+class TestSourceSpans:
+    """src_start on becmg_in_progress / active_overlays — the character offset into
+    taf_raw the group started at, threaded through for the Source Pane's ETA-window
+    highlight (see met_anchors.py, docs/adr/0002-two-document-source-pane.md)."""
+
+    def test_tempo_overlay_src_start_points_at_tempo_token(self):
+        taf = BASE_TAF + " TEMPO 2006/2008 3000 TSRA"
+        base, becmg, overlays = condense_taf(taf, _dt(2026, 6, 20, 6, 30))
+        assert len(overlays) == 1
+        s = overlays[0]["src_start"]
+        assert taf[s:].startswith("TEMPO")
+
+    def test_becmg_in_progress_src_start_points_at_becmg_token(self):
+        taf = BASE_TAF + " BECMG 2008/2010 25015KT"
+        base, becmg, overlays = condense_taf(taf, _dt(2026, 6, 20, 9, 0))
+        assert becmg is not None
+        s = becmg["src_start"]
+        assert taf[s:].startswith("BECMG")
+
+    def test_fm_overlay_src_start_points_at_fm_token_despite_normalized_type(self):
+        # condense_taf normalizes the output "type" to "FM" (dropping the DDHHMM
+        # digits), but src_start must still point at the raw "FM201800..." token.
+        taf = BASE_TAF + " FM201800 26005KT 4000 FU SCT100"
+        base, becmg, overlays = condense_taf(taf, _dt(2026, 6, 20, 17, 30))
+        assert len(overlays) == 1
+        assert overlays[0]["type"] == "FM"
+        s = overlays[0]["src_start"]
+        assert taf[s:].startswith("FM201800")
+
+
 class TestWindOnlyFold:
     """Wind-only BECMG/FM carries the previous conditions forward (only the
     wind changes); any group that also states vis/weather/cloud fully replaces."""

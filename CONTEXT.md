@@ -15,19 +15,40 @@ detail. See `CLAUDE.md` for architecture and `docs/adr/` for decisions.
 
 ## Source-document provenance
 
-- **Source document** — the original dispatch PDF as issued (currently the NOTAM document);
-  the legal source of truth a pilot cross-checks summaries against.
-- **Source Pane** — the collapsible viewer that shows a source document alongside the
-  briefing (split view). Optional mode: the briefing is complete without it.
-- **Anchor** — the recorded location (page + rectangle) of one NOTAM inside its source
-  document, captured when the document is parsed. A NOTAM without an anchor is still
-  briefed; it just cannot be located in the source.
-- **Source Highlight** — the blue rectangle drawn in the Source Pane around the anchored
-  NOTAM block (ID line + validity line + body) when the pilot taps that NOTAM in the
-  briefing.
+- **Source document** — an original dispatch PDF as issued (the NOTAM document and the MET
+  document); the legal source of truth a pilot cross-checks summaries against.
+- **Source Pane** — the collapsible viewer that shows the source documents alongside the
+  briefing (split view), one Document Section per document. Optional mode: the briefing is
+  complete without it.
+- **Document Section** — the region of the Source Pane devoted to one source document (MET
+  on top, NOTAM below), individually collapsible to its header bar. On narrow screens the
+  sections behave as an accordion: exactly one open at a time.
+- **Anchor** — the recorded location (page + rectangle) of one briefed item inside its
+  source document, captured when the document is parsed: a NOTAM's block in the NOTAM
+  document, or an airport's MET Block in the MET document. An item without an anchor is
+  still briefed; it just cannot be located in the source.
+- **MET Block** — the contiguous region of the MET document belonging to one airport
+  (header line, runway line, METAR, TAF). The unit a MET anchor encloses; every MET element
+  in the briefing panel points at the whole block, never a sub-part.
+- **Source Highlight** — the blue border rectangle drawn in a Document Section around the
+  anchored block when the pilot taps that item in the briefing. At most one per document;
+  a MET and a NOTAM highlight may be visible at the same time.
+- **ETA-Window Highlight** — a translucent leg-colored fill drawn inside a highlighted MET
+  Block over each raw TAF group that is operationally relevant in a leg's ETA±1h window
+  (the groups the panel shows as BECMG-in-progress or active overlays). All legs' fills show
+  at once, tagged L1/L2 when the airport has more than one leg; the synthesized baseline and
+  out-of-window groups are never filled. A fill that cannot be located precisely is omitted,
+  never approximated.
 - **Owner** — the entity a NOTAM is attributed to: an airport (ICAO), a FIR, or a
   flight-wide section (GENERAL / FLIGHT LEG / AEROPLANE). The same NOTAM id can appear
   under different owners; owner + id identifies one anchored occurrence.
+- **Selection Sync** — the Source Pane following the pilot's map/header selection (airport
+  marker, header button, FIR diamond, FLIGHT button, prev/next nav) while the pane is
+  already open, so browsing the briefing keeps both documents current with zero extra taps.
+  Only active while the pane is open; it never opens the pane itself, and it never changes
+  layout (no expand, no collapse, no accordion flip) — a collapsed section's highlight
+  updates silently and is already correct when reopened. Distinct from a manual row tap,
+  which still opens/expands as before.
 
 ## NOTAM classification
 

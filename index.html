@@ -95,7 +95,7 @@
     .nav-btn:hover  { background: #22254a; border-color: #404880; }
     .nav-btn:active { background: #2a2e58; }
 
-    /* ── Source Pane (original NOTAM PDF, click-to-highlight) ── */
+    /* ── Source Pane (original MET + NOTAM PDFs, click-to-highlight) ── */
     #srcPane {
       position: fixed;
       top: 58px; left: 0; bottom: 0;
@@ -123,9 +123,48 @@
       color: #778; border-radius: 6px;
     }
     #srcPane-close:hover { color: #aac; background: #1e2048; }
-    #srcPageStack {
+
+    /* Two Document Sections: MET (25%) on top, NOTAM (75%) below on wide screens.
+       A section only renders if its anchors JSON loaded (.src-doc-hidden). */
+    #srcSections { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+    .src-doc-section {
+      display: flex; flex-direction: column;
+      border-bottom: 1px solid #1e2248;
+      min-height: 0;
+    }
+    .src-doc-section:last-child { border-bottom: none; }
+    .src-doc-section.src-doc-hidden { display: none; }
+    .src-doc-section[data-doc="met"]   { flex: 0 0 25%; }
+    .src-doc-section[data-doc="notam"] { flex: 1 1 auto; }
+
+    .src-doc-header {
+      flex-shrink: 0;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 14px; min-height: 44px;
+      cursor: pointer; touch-action: manipulation;
+      font-size: 0.78rem; font-weight: 700; letter-spacing: 0.08em;
+      color: #778; text-transform: uppercase;
+      background: #10112a;
+    }
+    .src-doc-header:hover { color: #aac; }
+    .src-doc-title { display: flex; align-items: center; gap: 6px; }
+    .src-doc-chevron { display: inline-block; transition: transform 0.2s ease; font-size: 0.7rem; }
+    .src-doc-section.src-collapsed .src-doc-chevron { transform: rotate(-90deg); }
+    .src-doc-legend {
+      display: none; align-items: center; gap: 10px;
+      font-size: 0.66rem; font-weight: 600; letter-spacing: 0.02em;
+      text-transform: none; color: #99a;
+    }
+    .src-doc-legend.show { display: flex; }
+    .src-doc-legend .swatch {
+      display: inline-block; width: 8px; height: 8px; border-radius: 2px;
+      margin-right: 3px; vertical-align: middle;
+    }
+
+    .src-doc-stack {
       flex: 1; overflow-y: auto; overscroll-behavior: contain;
       padding: 10px; display: flex; flex-direction: column; gap: 10px;
+      min-height: 0;
     }
     .src-page { position: relative; width: 100%; background: #fff; }
     .src-page img { display: block; width: 100%; height: auto; }
@@ -136,10 +175,39 @@
       box-shadow: 0 0 10px rgba(74,124,240,0.55);
       pointer-events: none;
     }
+    /* ETA-window fills (MET only): translucent leg-colored rects layered inside
+       a highlighted MET Block over the TAF groups relevant at each leg's ETA±1h. */
+    .src-fill {
+      position: absolute;
+      border-radius: 2px;
+      pointer-events: none;
+    }
+    .src-fill-tag {
+      position: absolute;
+      top: 0; left: 0;
+      transform: translate(-100%, -2px);
+      font-size: 0.58rem; font-weight: 700;
+      padding: 1px 3px; border-radius: 2px 0 0 2px;
+      white-space: nowrap;
+      pointer-events: none;
+    }
 
-    /* Selected state on NOTAM rows linked to the source doc */
+    /* Narrow viewports: accordion — the expanded section fills the 50vh band;
+       JS (_isNarrow / _setSectionCollapsed) enforces exactly one open. */
+    @media (max-width: 900px) {
+      .src-doc-section[data-doc="met"],
+      .src-doc-section[data-doc="notam"] { flex: 1 1 auto; }
+    }
+    /* Collapsed section: header only. !important so this always wins over the
+       flex-basis rules above regardless of viewport (equal-specificity ties
+       would otherwise depend on fragile source-order). */
+    .src-doc-section.src-collapsed { flex: 0 0 auto !important; }
+    .src-doc-section.src-collapsed .src-doc-stack { display: none; }
+
+    /* Selected state on rows linked to the source doc */
     .notam-row[data-anchor-key] { cursor: pointer; }
-    .notam-row.src-selected { background: rgba(74,124,240,0.10); }
+    .met-row[data-met-anchor]   { cursor: pointer; }
+    .notam-row.src-selected, .met-row.src-selected { background: rgba(74,124,240,0.10); }
 
     /* 44×44 touch target for close button */
     .panel-close {
@@ -255,15 +323,6 @@
     }
     .leg-chip:not(.leg2) { background: #0e1e38; color: #5b9ef4; border: 1px solid #2a4a7a; }
     .leg-chip.leg2       { background: #2e1e08; color: #f4a15b; border: 1px solid #7a4a18; }
-    .taf-clickable { cursor: pointer; }
-    .taf-clickable:hover { text-decoration: underline dotted #6e7681; }
-    .taf-expand-block {
-      font-family: ui-monospace, SFMono-Regular, monospace;
-      font-size: 0.82rem; color: #8b949e;
-      background: #0d1117; border: 1px solid #30363d;
-      border-radius: 4px; padding: 6px 8px;
-      margin-top: 5px; word-break: break-all; white-space: pre-wrap;
-    }
     /* 44px min-height touch target for "show N more" */
     .t3-expand {
       font-size: 0.88rem; color: #556; cursor: pointer; touch-action: manipulation;
@@ -440,10 +499,24 @@
 
 <div id="srcPane">
   <div id="srcPane-header">
-    <span>NOTAM — Original</span>
+    <span>Source Documents</span>
     <span id="srcPane-close" onclick="closeSrcPane()">✕</span>
   </div>
-  <div id="srcPageStack"></div>
+  <div id="srcSections">
+    <div id="srcSection-met" class="src-doc-section src-doc-hidden" data-doc="met">
+      <div class="src-doc-header" onclick="toggleSrcSection('met')">
+        <span class="src-doc-title"><span class="src-doc-chevron">▾</span> MET — Original</span>
+        <span id="srcMetLegend" class="src-doc-legend"></span>
+      </div>
+      <div class="src-doc-stack" id="srcStack-met"></div>
+    </div>
+    <div id="srcSection-notam" class="src-doc-section src-doc-hidden" data-doc="notam">
+      <div class="src-doc-header" onclick="toggleSrcSection('notam')">
+        <span class="src-doc-title"><span class="src-doc-chevron">▾</span> NOTAM — Original</span>
+      </div>
+      <div class="src-doc-stack" id="srcStack-notam"></div>
+    </div>
+  </div>
 </div>
 
 <div id="map"></div>
@@ -477,8 +550,20 @@ let _navAirports = [];
 let _navFirs     = [];
 let _navIndex    = -1;
 
-// ── Source Pane (original NOTAM PDF, click-to-highlight) ────────────────────
-let _srcPane = { open: false, loaded: false, activeKey: null, anchors: null, pageSizes: [], pages: 0 };
+// ── Source Pane (original MET + NOTAM PDFs, click-to-highlight) ─────────────
+//   docs.met / docs.notam each hold their own anchors/pages/collapse state so
+//   the two Document Sections act independently (see CONTEXT.md — "Document
+//   Section"). highlightEls/selectedRowEl are tracked per doc so clearing one
+//   document's highlight never touches the other's.
+let _srcPane = {
+  open: false,
+  docs: {
+    met:   { anchors: null, pageSizes: [], pages: 0, loaded: false, collapsed: false,
+             activeKey: null, selectedRowEl: null, highlightEls: [] },
+    notam: { anchors: null, pageSizes: [], pages: 0, loaded: false, collapsed: false,
+             activeKey: null, selectedRowEl: null, highlightEls: [] },
+  },
+};
 
 const map = L.map("map", { center: [30, 60], zoom: 3 });
 
@@ -533,6 +618,7 @@ function openPanel(data, type = 'airport') {
   const key  = type === 'fir' ? data.fir : data.icao;
   _navIndex  = list.findIndex(e => e.type === type && (e.type === 'fir' ? e.data.fir : e.data.icao) === key);
   _updateNavBar();
+  _syncSourcePane(data, type);
 }
 
 function expandT3(uid, btn) {
@@ -551,23 +637,56 @@ function esc(s) {
           .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 }
 
-// ── Source Pane: lazy page stack, open/close, click-to-highlight ────────────
-function _buildSrcPaneDom() {
-  if (_srcPane.loaded) return;
+// ── Source Pane: lazy page stacks, open/close, collapse/accordion,
+//    click-to-highlight, ETA-window fills ────────────────────────────────────
+
+function _isNarrow() {
+  return window.matchMedia('(max-width: 900px)').matches;
+}
+
+function _srcPagePrefix(doc) {
+  return doc === 'met' ? 'met_page' : 'notam_page';
+}
+
+function _buildSrcDocDom(doc) {
+  const d = _srcPane.docs[doc];
+  if (d.loaded || !d.pages) return;
   let html = '';
-  for (let i = 1; i <= _srcPane.pages; i++) {
-    const [pw, ph] = _srcPane.pageSizes[i - 1] || [595, 842];
+  for (let i = 1; i <= d.pages; i++) {
+    const [pw, ph] = d.pageSizes[i - 1] || [595, 842];
     const page = String(i).padStart(3, '0');
-    html += `<div class="src-page" id="src-page-${i}" style="aspect-ratio:${pw}/${ph}">
-      <img src="${DATA('notam_page_' + page + '.png')}" loading="lazy" alt="NOTAM page ${i}">
+    html += `<div class="src-page" id="src-page-${doc}-${i}" style="aspect-ratio:${pw}/${ph}">
+      <img src="${DATA(_srcPagePrefix(doc) + '_' + page + '.png')}" loading="lazy" alt="${doc.toUpperCase()} page ${i}">
     </div>`;
   }
-  document.getElementById('srcPageStack').innerHTML = html;
-  _srcPane.loaded = true;
+  document.getElementById(`srcStack-${doc}`).innerHTML = html;
+  d.loaded = true;
+}
+
+// Collapsing a section shrinks it to its header bar; on narrow viewports
+// (accordion), expanding one section forces the other to collapse.
+function _setSectionCollapsed(doc, collapsed) {
+  _srcPane.docs[doc].collapsed = collapsed;
+  document.getElementById(`srcSection-${doc}`).classList.toggle('src-collapsed', collapsed);
+
+  if (!collapsed && _isNarrow()) {
+    const other = doc === 'met' ? 'notam' : 'met';
+    _srcPane.docs[other].collapsed = true;
+    document.getElementById(`srcSection-${other}`).classList.add('src-collapsed');
+  }
+}
+
+function toggleSrcSection(doc) {
+  _setSectionCollapsed(doc, !_srcPane.docs[doc].collapsed);
+}
+
+function _expandSection(doc) {
+  _setSectionCollapsed(doc, false);
 }
 
 function openSrcPane() {
-  _buildSrcPaneDom();
+  _buildSrcDocDom('met');
+  _buildSrcDocDom('notam');
   _srcPane.open = true;
   document.body.classList.add('src-open');
   document.getElementById('docBtn')?.classList.add('src-active');
@@ -578,7 +697,8 @@ function closeSrcPane() {
   _srcPane.open = false;
   document.body.classList.remove('src-open');
   document.getElementById('docBtn')?.classList.remove('src-active');
-  _clearSrcHighlight();
+  _clearDocHighlight('met');
+  _clearDocHighlight('notam');
   map.invalidateSize();
 }
 
@@ -586,44 +706,188 @@ function toggleSrcPane() {
   if (_srcPane.open) closeSrcPane(); else openSrcPane();
 }
 
-function _clearSrcHighlight() {
-  document.querySelectorAll('.src-highlight').forEach(el => el.remove());
-  document.querySelectorAll('.notam-row.src-selected').forEach(el => el.classList.remove('src-selected'));
+function _clearDocHighlight(doc) {
+  const d = _srcPane.docs[doc];
+  d.highlightEls.forEach(el => el.remove());
+  d.highlightEls = [];
+  if (d.selectedRowEl) {
+    d.selectedRowEl.classList.remove('src-selected');
+    d.selectedRowEl = null;
+  }
 }
 
-// Tapping any NOTAM row that carries a data-anchor-key opens the Source Pane
-// (auto-opening it the first time) and draws a highlight over that NOTAM's
-// block in the original PDF page image.
-function showSourceAnchor(key, rowEl) {
-  const rects = _srcPane.anchors && _srcPane.anchors[key];
-  if (!rects || !rects.length) return;
+function _positionRect(el, r) {
+  el.style.left   = (r.x0 * 100) + '%';
+  el.style.top    = (r.y0 * 100) + '%';
+  el.style.width  = ((r.x1 - r.x0) * 100) + '%';
+  el.style.height = ((r.y1 - r.y0) * 100) + '%';
+}
 
-  openSrcPane();
-  _clearSrcHighlight();
-  if (rowEl) rowEl.classList.add('src-selected');
-  _srcPane.activeKey = key;
+function _rgba(hex, alpha) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+}
+
+// buildPanel synthesizes a single-leg array for legacy flat-schema airports;
+// shared here so ETA-window fills use the identical leg list the panel showed.
+function _legsFor(ap) {
+  return ap.legs || [{
+    leg: 1,
+    ref_time:          ap.ref_time,
+    taf_base:          ap.taf_base,
+    becmg_in_progress: ap.becmg_in_progress,
+    active_overlays:   ap.active_overlays || [],
+    notams:            ap.notams || [],
+    notam_covered:     ap.notam_covered,
+    wx_tier:           ap.wx_tier,
+  }];
+}
+
+function _updateMetLegend(multiLeg) {
+  const el = document.getElementById('srcMetLegend');
+  if (!el) return;
+  if (!multiLeg) { el.classList.remove('show'); el.innerHTML = ''; return; }
+  el.innerHTML =
+    `<span><span class="swatch" style="background:${ROUTE_COLORS[0]}"></span>L1</span>` +
+    `<span><span class="swatch" style="background:${ROUTE_COLORS[1]}"></span>L2</span>` +
+    `<span>= ETA±1h</span>`;
+  el.classList.add('show');
+}
+
+// ETA-window highlights: for each leg, the raw TAF groups behind the panel's
+// BECMG-in-progress / active-overlay sections get a translucent leg-colored
+// fill inside the already-drawn block border. A lookup miss (no groups for
+// this airport, or an offset the anchor pass didn't resolve) draws nothing —
+// never approximate (see docs/adr/0001, docs/adr/0002).
+function _drawMetEtaFills(icao, entry) {
+  const groups = entry.groups || {};
+  const ap = (_navAirports || []).find(a => a.icao === icao);
+  if (!ap) { _updateMetLegend(false); return; }
+
+  const legs = _legsFor(ap);
+  const multiLeg = legs.length > 1;
+
+  legs.forEach(leg => {
+    const color = ROUTE_COLORS[(leg.leg - 1) % ROUTE_COLORS.length];
+    const spans = [];
+    if (leg.becmg_in_progress && leg.becmg_in_progress.src_start != null) {
+      spans.push(leg.becmg_in_progress.src_start);
+    }
+    (leg.active_overlays || []).forEach(ov => {
+      if (ov.src_start != null) spans.push(ov.src_start);
+    });
+
+    spans.forEach(srcStart => {
+      const rects = groups[String(srcStart)];
+      if (!rects) return;
+      rects.forEach(r => {
+        const pageEl = document.getElementById(`src-page-met-${r.page}`);
+        if (!pageEl) return;
+        const fill = document.createElement('div');
+        fill.className = 'src-fill';
+        _positionRect(fill, r);
+        fill.style.background = _rgba(color, 0.32);
+        fill.style.border = `1px solid ${color}`;
+        if (multiLeg) {
+          const tag = document.createElement('span');
+          tag.className = 'src-fill-tag';
+          tag.textContent = `L${leg.leg}`;
+          tag.style.background = color;
+          tag.style.color = '#0d0e1c';
+          fill.appendChild(tag);
+        }
+        pageEl.appendChild(fill);
+        _srcPane.docs.met.highlightEls.push(fill);
+      });
+    });
+  });
+
+  _updateMetLegend(multiLeg);
+}
+
+// Content half of a source-anchor jump: clear this doc's previous highlight,
+// draw the new block border (+ ETA-window fills for MET), mark the row
+// selected, and scroll it into view. No layout side effects (no open/expand)
+// — callers decide whether this jump should touch layout (see
+// showSourceAnchor vs. _syncSourcePane / CONTEXT.md "Selection Sync").
+function _drawDocAnchor(doc, key, rowEl) {
+  const anchors = _srcPane.docs[doc].anchors;
+  const entry = anchors && anchors[key];
+  if (!entry) return;
+
+  const blockRects = doc === 'met' ? (entry.block || []) : entry;
+  if (!blockRects.length) return;
+
+  _clearDocHighlight(doc);
+  if (rowEl) {
+    rowEl.classList.add('src-selected');
+    _srcPane.docs[doc].selectedRowEl = rowEl;
+  }
+  _srcPane.docs[doc].activeKey = key;
 
   let firstEl = null;
-  rects.forEach(r => {
-    const pageEl = document.getElementById(`src-page-${r.page}`);
+  blockRects.forEach(r => {
+    const pageEl = document.getElementById(`src-page-${doc}-${r.page}`);
     if (!pageEl) return;
     const hl = document.createElement('div');
     hl.className = 'src-highlight';
-    hl.style.left   = (r.x0 * 100) + '%';
-    hl.style.top    = (r.y0 * 100) + '%';
-    hl.style.width  = ((r.x1 - r.x0) * 100) + '%';
-    hl.style.height = ((r.y1 - r.y0) * 100) + '%';
+    _positionRect(hl, r);
     pageEl.appendChild(hl);
+    _srcPane.docs[doc].highlightEls.push(hl);
     if (!firstEl) firstEl = hl;
   });
+
+  if (doc === 'met') _drawMetEtaFills(key, entry);
+
   if (firstEl) firstEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
+// Tapping any row that carries a data-anchor-key (NOTAM) or data-met-anchor
+// (MET) opens the Source Pane (auto-opening it the first time), auto-expands
+// (or accordion-flips to) that document's section, and draws a highlight over
+// the anchored block in the original PDF page image. MET taps additionally
+// layer ETA-window fills inside the block. At most one highlight per document
+// — a MET highlight and a NOTAM highlight may be visible at the same time.
+function showSourceAnchor(doc, key, rowEl) {
+  const anchors = _srcPane.docs[doc].anchors;
+  if (!anchors || !anchors[key]) return;
+
+  openSrcPane();
+  _expandSection(doc);
+  _drawDocAnchor(doc, key, rowEl);
+}
+
 document.addEventListener('click', e => {
-  const row = e.target.closest('.notam-row[data-anchor-key]');
-  if (!row) return;
-  showSourceAnchor(row.dataset.anchorKey, row);
+  const notamRow = e.target.closest('.notam-row[data-anchor-key]');
+  if (notamRow) { showSourceAnchor('notam', notamRow.dataset.anchorKey, notamRow); return; }
+
+  const metRow = e.target.closest('.met-row[data-met-anchor]');
+  if (metRow) { showSourceAnchor('met', metRow.dataset.metAnchor, metRow); return; }
 });
+
+// Selection Sync (docs/adr/0002, CONTEXT.md "Selection Sync"): while the
+// Source Pane is open, selecting anything on the map or in the header drives
+// both documents without changing layout — no open, no expand, no accordion
+// flip (Decision 4). The first anchored NOTAM row in displayed (DOM) order IS
+// the panel's first-by-severity row (T1 else T2 else T3), so no re-sorting is
+// needed here; this also makes FIR and FLIGHT panels work with zero extra
+// logic (Decision 2/3). Only airport selections touch the MET document.
+function _syncSourcePane(data, type) {
+  if (!_srcPane.open) return;
+
+  const panel = document.getElementById('panel-content');
+  if (!panel) return;
+
+  if (type === 'airport') {
+    const metAnchors = _srcPane.docs.met.anchors;
+    if (metAnchors && metAnchors[data.icao]) {
+      _drawDocAnchor('met', data.icao, panel.querySelector('.met-row[data-met-anchor]'));
+    }
+  }
+
+  const row = panel.querySelector('.notam-row[data-anchor-key]');
+  if (row) _drawDocAnchor('notam', row.dataset.anchorKey, row);
+}
 
 // ── Runway chips (built from union of notams across all legs) ───────────────
 function buildChips(runway_info, allNotams) {
@@ -711,21 +975,7 @@ function clearNotamFilter() {
   });
 }
 
-const _tafRaw = {};
 let _generalNotams = [];
-function toggleTaf(el, icao) {
-  const next = el.nextElementSibling;
-  if (next && next.classList.contains('taf-expand-block')) {
-    next.remove();
-    return;
-  }
-  const raw = _tafRaw[icao] || '';
-  if (!raw) return;
-  const block = document.createElement('div');
-  block.className = 'taf-expand-block';
-  block.textContent = raw;
-  el.insertAdjacentElement('afterend', block);
-}
 
 function badgeClass(type) {
   if (!type) return "badge-becmg";
@@ -751,7 +1001,7 @@ function notamRow(n, legInfo, anchorKey) {
     ? legInfo.map(num => `<span class="leg-chip${num === 2 ? ' leg2' : ''}">L${num}</span>`).join('')
     : '';
   const shown  = n.summary || n.body;
-  const hasAnchor = !!(anchorKey && _srcPane.anchors && _srcPane.anchors[anchorKey]);
+  const hasAnchor = !!(anchorKey && _srcPane.docs.notam.anchors && _srcPane.docs.notam.anchors[anchorKey]);
   const anchorAttr = hasAnchor ? ` data-anchor-key="${esc(anchorKey)}"` : '';
   let row = `<div class="notam-row" id="${domId}" data-notam-id="${safeId}"${anchorAttr}>
     <div class="notam-header">
@@ -775,17 +1025,7 @@ function compactWindow(w) {
 
 // ── buildPanel: MET for all legs first, then unified NOTAM block ─────────────
 function buildPanel(ap) {
-  if (ap.taf_raw) _tafRaw[ap.icao] = ap.taf_raw;
-  const legs = ap.legs || [{
-    leg: 1,
-    ref_time:          ap.ref_time,
-    taf_base:          ap.taf_base,
-    becmg_in_progress: ap.becmg_in_progress,
-    active_overlays:   ap.active_overlays || [],
-    notams:            ap.notams || [],
-    notam_covered:     ap.notam_covered,
-    wx_tier:           ap.wx_tier,
-  }];
+  const legs = _legsFor(ap);
 
   const allNotams = legs.flatMap(l => l.notams || []);
   const multiLeg  = legs.length > 1;
@@ -800,21 +1040,27 @@ function buildPanel(ap) {
   </div>`;
 
   // ── MET block: all legs in order ─────────────────────────────────────────
+  // Every MET row (conditions / BECMG-in-progress / overlay) taps to the same
+  // whole-block Source Highlight — see CONTEXT.md "MET Block". One anchor
+  // attribute value per airport, applied uniformly across all three row kinds.
+  const hasMetAnchor = !!(_srcPane.docs.met.anchors && _srcPane.docs.met.anchors[ap.icao]);
+  const metAttr = hasMetAnchor ? ` data-met-anchor="${esc(ap.icao)}"` : '';
+
   legs.forEach(leg => {
     if (multiLeg) {
       const cls = leg.leg === 2 ? "leg-divider-label leg2" : "leg-divider-label";
       html += `<div class="leg-divider"><span class="${cls}">LEG ${leg.leg} · ${esc(leg.ref_time)}</span> ${wxTag(leg.wx_tier)}</div>`;
     }
-    html += `<div class="panel-section">
+    html += `<div class="panel-section met-row"${metAttr}>
       <div class="panel-label">Conditions at ${esc(leg.ref_time)} ${multiLeg ? "" : wxTag(leg.wx_tier)}</div>`;
     html += leg.taf_base
-      ? `<div class="panel-value taf-clickable" onclick="toggleTaf(this,'${ap.icao}')">${esc(leg.taf_base)}</div>`
+      ? `<div class="panel-value">${esc(leg.taf_base)}</div>`
       : `<div class="no-data">No TAF</div>`;
     html += `</div>`;
 
     if (leg.becmg_in_progress) {
       const b = leg.becmg_in_progress;
-      html += `<div class="panel-section">
+      html += `<div class="panel-section met-row"${metAttr}>
         <div class="panel-label">BECMG in progress</div>
         <span class="badge badge-becmg">BECMG</span>
         <span class="badge-window">${esc(b.window)}</span>
@@ -822,7 +1068,7 @@ function buildPanel(ap) {
       </div>`;
     }
     (leg.active_overlays || []).forEach(ov => {
-      html += `<div class="panel-section">
+      html += `<div class="panel-section met-row"${metAttr}>
         <span class="badge ${badgeClass(ov.type)}">${esc(ov.type)}</span>
         <span class="badge-window">${esc(ov.window)}</span>
         <div class="panel-value" style="margin-top:5px">${esc(ov.text)}</div>
@@ -959,6 +1205,7 @@ function openFlightPanel() {
   document.body.classList.add('panel-open');
   _navIndex = -1;
   _updateNavBar();
+  _syncSourcePane(null, 'flight');
 }
 
 function buildFlightPanel(sections) {
@@ -1131,16 +1378,24 @@ function renderHeaderAirportBtns(airports, legs) {
   });
 }
 
-// ── Source Pane data (original NOTAM PDF pages + click-to-highlight anchors).
-//   Absent on legacy runs, the MVP demo, or if pipeline rendering failed —
-//   DOC button stays hidden and the feature is invisible (best-effort).
-fetch(DATA("notam_anchors.json")).then(r => r.ok ? r.json() : null).then(data => {
-  if (!data) return;
-  _srcPane.anchors    = data.anchors || {};
-  _srcPane.pageSizes  = data.page_sizes || [];
-  _srcPane.pages      = data.pages || 0;
-  document.getElementById("docBtn").style.display = "";
-}).catch(() => {});
+// ── Source Pane data (original MET + NOTAM PDF pages + click-to-highlight
+//   anchors). Each document loads independently — a run missing one JSON
+//   (rendering failure, legacy run, MVP demo) just keeps that Document
+//   Section hidden (.src-doc-hidden) instead of losing the whole pane. The
+//   DOC button appears as soon as either document loads.
+function _fetchSrcDoc(doc, filename) {
+  fetch(DATA(filename)).then(r => r.ok ? r.json() : null).then(data => {
+    if (!data) return;
+    const d = _srcPane.docs[doc];
+    d.anchors   = data.anchors || {};
+    d.pageSizes = data.page_sizes || [];
+    d.pages     = data.pages || 0;
+    document.getElementById(`srcSection-${doc}`).classList.remove('src-doc-hidden');
+    document.getElementById("docBtn").style.display = "";
+  }).catch(() => {});
+}
+_fetchSrcDoc('met', 'met_anchors.json');
+_fetchSrcDoc('notam', 'notam_anchors.json');
 
 // ── Dropped-airport warnings (e.g. MET PDF airport with no known coords) ───
 fetch(DATA("warnings.json")).then(r => r.ok ? r.json() : []).then(warnings => {

@@ -102,6 +102,80 @@ class TestTG921NOTAMValidation:
 
 
 @pytest.mark.integration
+class TestMetAnchors:
+    """Validate met_anchors.py (Source Pane click-to-highlight + ETA-window fills)
+    against TG921_MET.pdf.
+
+    Position-aware companion pass to met_engine.parse_met_pdf() — see met_anchors.py
+    and docs/adr/0002-two-document-source-pane.md.
+    """
+
+    @pytest.fixture(scope="class")
+    def parsed(self):
+        import sys
+        sys.path.insert(0, ROOT)
+        from met_anchors import extract_anchors
+        anchors, page_sizes = extract_anchors(FIXTURE_MET)
+        return anchors, page_sizes
+
+    @pytest.fixture(scope="class")
+    def met_airports(self):
+        import sys
+        sys.path.insert(0, ROOT)
+        from met_engine import parse_met_pdf
+        airports, order = parse_met_pdf(FIXTURE_MET)
+        return airports, order
+
+    def test_full_coverage(self, parsed, met_airports):
+        anchors, _ = parsed
+        _, order = met_airports
+        assert set(anchors.keys()) == set(order)
+
+    def test_known_single_page_block(self, parsed):
+        anchors, _ = parsed
+        assert [r["page"] for r in anchors["EDDF"]["block"]] == [1]
+        assert [r["page"] for r in anchors["VTBS"]["block"]] == [1]
+
+    def test_page_crossing_block(self, parsed):
+        anchors, _ = parsed
+        assert [r["page"] for r in anchors["VECC"]["block"]] == [1, 2]
+
+    def test_group_rect_fidelity_for_all_taf_airports(self, parsed, met_airports):
+        import re
+        import sys
+        sys.path.insert(0, ROOT)
+        from met_engine import _GROUP_RE
+        anchors, _ = parsed
+        airports, order = met_airports
+        for icao in order:
+            taf = airports[icao]["taf_raw"]
+            if taf is None:
+                continue
+            expected = {str(m.start()) for m in _GROUP_RE.finditer(taf)}
+            got = anchors[icao].get("groups", {})
+            assert set(got.keys()) == expected, f"{icao}: fidelity gate dropped groups"
+
+    def test_known_group_offsets(self, parsed):
+        anchors, _ = parsed
+        assert set(anchors["VTBS"]["groups"].keys()) == {"41", "98"}
+
+    def test_all_rects_normalized(self, parsed):
+        anchors, _ = parsed
+        for icao, entry in anchors.items():
+            for r in entry["block"]:
+                assert 0 <= r["x0"] < r["x1"] <= 1, f"{icao} block: bad x range {r}"
+                assert 0 <= r["y0"] < r["y1"] <= 1, f"{icao} block: bad y range {r}"
+            for src_start, rects in entry.get("groups", {}).items():
+                for r in rects:
+                    assert 0 <= r["x0"] < r["x1"] <= 1, f"{icao} group {src_start}: bad x range {r}"
+                    assert 0 <= r["y0"] < r["y1"] <= 1, f"{icao} group {src_start}: bad y range {r}"
+
+    def test_page_sizes_match_page_count(self, parsed):
+        _, page_sizes = parsed
+        assert len(page_sizes) == 7
+
+
+@pytest.mark.integration
 class TestNotamAnchors:
     """Validate notam_anchors.py (Source Pane click-to-highlight) against TG921_NOTAM.pdf.
 

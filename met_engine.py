@@ -217,7 +217,8 @@ def _parse_groups(taf_raw, ref_dt):
         else:
             continue  # malformed
 
-        groups.append({"type": gtype, "start": start, "end": end, "text": gtext})
+        groups.append({"type": gtype, "start": start, "end": end, "text": gtext,
+                        "src_start": gm.start()})
 
     return base_text, groups
 
@@ -271,13 +272,15 @@ def condense_taf(taf_raw, ref_dt):
 
     becmg_out = (
         {"text": _fold_conditions(becmg_prog_base, becmg_prog["text"]),
-         "window": _fmt_window(becmg_prog["start"], becmg_prog["end"])}
+         "window": _fmt_window(becmg_prog["start"], becmg_prog["end"]),
+         "src_start": becmg_prog["src_start"]}
         if becmg_prog else None
     )
     overlay_out = [
         {"type": "FM" if g["type"].startswith("FM") else g["type"],
          "text": g["text"],
-         "window": _fmt_window(g["start"], g["end"])}
+         "window": _fmt_window(g["start"], g["end"]),
+         "src_start": g["src_start"]}
         for g in overlays
     ]
     return baseline, becmg_out, overlay_out

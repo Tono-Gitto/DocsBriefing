@@ -13,6 +13,7 @@ data/airports.json
 data/fir_notams.json
 data/flight_info.json
 data/route.json
+data/fir_coords_learned.json
 
 # Python cache
 __pycache__/
