@@ -189,26 +189,6 @@
       border-width: 2px;
       border-style: solid;
     }
-    .src-fill-tag {
-      position: absolute;
-      top: 0; left: 0;
-      transform: translate(-100%, -2px);
-      font-size: 0.58rem; font-weight: 700;
-      padding: 1px 3px; border-radius: 2px 0 0 2px;
-      white-space: nowrap;
-      pointer-events: none;
-    }
-    /* Fills near the page's left margin flip the tag to the right side
-       instead — a left-anchored tag on a box that starts near x0=0 pushes
-       past the scrollable page container's left edge (x<0 is unreachable,
-       overflow-x:auto can't scroll negative) and gets clipped, most visibly
-       on wide merged tags like "L1+L2". */
-    .src-fill-tag-right {
-      left: 100%;
-      transform: translate(4px, -2px);
-      border-radius: 0 2px 2px 0;
-    }
-
     /* Narrow viewports: accordion — the expanded section fills the 50vh band;
        JS (_isNarrow / _setSectionCollapsed) enforces exactly one open. */
     @media (max-width: 900px) {
@@ -540,6 +520,7 @@
 <div id="wxLegend">
   <div class="row"><span class="dot" style="background:#4cff91"></span> Good</div>
   <div class="row"><span class="dot" style="background:#ffd23f"></span> Caution</div>
+  <div class="row"><span class="dot" style="background:#ff8c1a"></span> Probable severe</div>
   <div class="row"><span class="dot" style="background:#ff5050"></span> Significant</div>
   <div class="sep"></div>
   <div class="row"><span class="ring" style="border-color:#fff"></span> Dep/Dest</div>
@@ -788,7 +769,7 @@ function _unionRect(a, b) {
 // by more than one leg (see _drawMergedFills) — a second color draws as an
 // outer ring via box-shadow so both legs stay visible on one fill instead of
 // one leg's box fully occluding the other's.
-function _appendMetFill(colors, rect, extraCls, tag) {
+function _appendMetFill(colors, rect, extraCls) {
   const pageEl = document.getElementById(`src-page-met-${rect.page}`);
   if (!pageEl) return;
   const list = Array.isArray(colors) ? colors : [colors];
@@ -798,14 +779,6 @@ function _appendMetFill(colors, rect, extraCls, tag) {
   fill.style.background = _rgba(list[0], 0.32);
   fill.style.border = `${extraCls === 'src-fill-base' ? 2 : 1}px solid ${list[0]}`;
   if (list.length > 1) fill.style.boxShadow = `0 0 0 2px ${list[1]}`;
-  if (tag) {
-    const tagEl = document.createElement('span');
-    tagEl.className = rect.x0 < 0.05 ? 'src-fill-tag src-fill-tag-right' : 'src-fill-tag';
-    tagEl.textContent = tag;
-    tagEl.style.background = list[0];
-    tagEl.style.color = '#0d0e1c';
-    fill.appendChild(tagEl);
-  }
   pageEl.appendChild(fill);
   _srcPane.docs.met.highlightEls.push(fill);
 }
@@ -816,13 +789,11 @@ function _appendMetFill(colors, rect, extraCls, tag) {
 // "words"). A token whose exact [s, s+t.length) span isn't in entry.words is
 // a graceful miss — draw nothing, never approximate (docs/adr/0001, 0002).
 //
-// Returns fill entries {rect, leg, taggable} rather than drawing directly —
+// Returns fill entries {rect, leg} rather than drawing directly —
 // _drawMetEtaFills merges these across legs before drawing (see
 // _drawMergedFills) so two legs resolving to the identical rect (e.g. a quick
 // turnaround where nothing changed between both legs' ETAs) draw one shared
-// fill instead of the later leg's box fully hiding the earlier leg's. Only
-// the first merged rect per leg is taggable, matching this fill kind's
-// existing (pre-merge) convention of tagging just the first box per leg.
+// fill instead of the later leg's box fully hiding the earlier leg's.
 function _resolveBaselineFillEntries(taps, words, legNum) {
   if (!taps.length || !words.length) return [];
   const byStart = new Map(words.map(w => [w[0], w]));
@@ -847,12 +818,12 @@ function _resolveBaselineFillEntries(taps, words, legNum) {
     }
   });
 
-  return merged.map((m, i) => ({ rect: m.rect, leg: legNum, taggable: i === 0 }));
+  return merged.map(m => ({ rect: m.rect, leg: legNum }));
 }
 
-// Groups per-leg fill entries {rect, leg, taggable} by exact rect coordinates
-// (page + all four bounds) so legs whose ETA windows resolve to the identical
-// PDF rect draw ONE fill with a two-tone ring instead of stacking separate
+// Groups per-leg fill entries {rect, leg} by exact rect coordinates (page +
+// all four bounds) so legs whose ETA windows resolve to the identical PDF
+// rect draw ONE fill with a two-tone ring instead of stacking separate
 // same-position divs where the later leg always wins the draw order. Only
 // exact coordinate matches merge — never a nearby/approximate rect — since a
 // shared src_start or shared baseline token always resolves to the same
@@ -860,23 +831,20 @@ function _resolveBaselineFillEntries(taps, words, legNum) {
 // keyed per-airport, not per-leg). Scoped to one fill category per call —
 // window fills and baseline fills are never merged with each other, since
 // their border styles intentionally mean different things (ETA±1h vs at-ETA).
-function _drawMergedFills(entries, extraCls, multiLeg) {
+function _drawMergedFills(entries, extraCls) {
   const seen = new Map();
   const order = [];
-  entries.forEach(({ rect, leg, taggable }) => {
+  entries.forEach(({ rect, leg }) => {
     const key = `${rect.page}|${rect.x0}|${rect.y0}|${rect.x1}|${rect.y1}`;
     let g = seen.get(key);
-    if (!g) { g = { rect, legs: [], taggableLegs: [] }; seen.set(key, g); order.push(g); }
+    if (!g) { g = { rect, legs: [] }; seen.set(key, g); order.push(g); }
     if (!g.legs.includes(leg)) g.legs.push(leg);
-    if (taggable && !g.taggableLegs.includes(leg)) g.taggableLegs.push(leg);
   });
 
   order.forEach(g => {
     const legsSorted = g.legs.slice().sort((a, b) => a - b);
     const colors = legsSorted.map(n => ROUTE_COLORS[(n - 1) % ROUTE_COLORS.length]);
-    const taggedSorted = g.taggableLegs.slice().sort((a, b) => a - b);
-    const tag = multiLeg && taggedSorted.length ? taggedSorted.map(n => `L${n}`).join('+') : null;
-    _appendMetFill(colors, g.rect, extraCls, tag);
+    _appendMetFill(colors, g.rect, extraCls);
   });
 }
 
@@ -911,14 +879,14 @@ function _drawMetEtaFills(icao, entry) {
     spans.forEach(srcStart => {
       const rects = groups[String(srcStart)];
       if (!rects) return;
-      rects.forEach(r => windowEntries.push({ rect: r, leg: leg.leg, taggable: true }));
+      rects.forEach(r => windowEntries.push({ rect: r, leg: leg.leg }));
     });
 
     baselineEntries.push(..._resolveBaselineFillEntries(leg.taf_base_src || [], words, leg.leg));
   });
 
-  _drawMergedFills(windowEntries, null, multiLeg);
-  _drawMergedFills(baselineEntries, 'src-fill-base', multiLeg);
+  _drawMergedFills(windowEntries, null);
+  _drawMergedFills(baselineEntries, 'src-fill-base');
 
   _updateMetLegend(multiLeg);
 }
@@ -1418,13 +1386,13 @@ function firIcon(color) {
   });
 }
 
-// ── Marker color: weather severity (RED/YELLOW/GREEN); role shown via ring ──
+// ── Marker color: weather severity (RED/ORANGE/YELLOW/GREEN); role shown via ring ──
 let depSet  = new Set();
 let destSet = new Set();
 let altnSet = new Set();
 
-const WX_COLORS = { RED: "#ff5050", YELLOW: "#ffd23f", GREEN: "#4cff91" };
-const WX_RANK   = { GREEN: 0, YELLOW: 1, RED: 2 };
+const WX_COLORS = { RED: "#ff5050", ORANGE: "#ff8c1a", YELLOW: "#ffd23f", GREEN: "#4cff91" };
+const WX_RANK   = { GREEN: 0, YELLOW: 1, ORANGE: 2, RED: 3 };
 
 function worstWxTier(legs) {
   return (legs || []).reduce(

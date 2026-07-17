@@ -36,8 +36,8 @@ detail. See `CLAUDE.md` for architecture and `docs/adr/` for decisions.
 - **ETA-Window Highlight** — a translucent leg-colored fill drawn inside a highlighted MET
   Block over each raw TAF group that is operationally relevant in a leg's ETA±1h window
   (the groups the panel shows as BECMG-in-progress or active overlays). All legs' fills show
-  at once, tagged L1/L2 when the airport has more than one leg; out-of-window groups are
-  never filled. A fill that cannot be located precisely is omitted, never approximated.
+  at once, colored per leg (`ROUTE_COLORS`) when the airport has more than one leg; out-of-window
+  groups are never filled. A fill that cannot be located precisely is omitted, never approximated.
 - **Baseline Fill** — a translucent leg-colored fill drawn over the exact source tokens that
   make up "conditions at ETA" (`taf_base`) — a solid border distinguishes it from the thinner
   ETA-Window Highlight. Unlike the ETA-Window Highlight (which fills a whole raw TAF group),

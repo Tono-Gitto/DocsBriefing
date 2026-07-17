@@ -238,14 +238,72 @@ class TestWxTierFixtureAnchors:
 
 
 class TestWxTierSynthetic:
-    def test_baseline_tsra_is_red(self):
-        assert _tier_for_text("24010KT 3000 TSRA BKN008") == "RED"
-        assert _classify_wx_tier("24010KT 3000 TSRA BKN008", None, []) == "RED"
+    def test_baseline_phenomena_without_severe_vis_ceiling_is_yellow(self):
+        # VTCC/TG910 regression: a phenomena keyword (any intensity) never
+        # elevates severity past what vis/ceiling numbers themselves say —
+        # it only guarantees a YELLOW floor. vis 3000 / ceiling 800ft are
+        # both YELLOW-band, not RED-band, so TSRA here stays YELLOW.
+        assert _tier_for_text("24010KT 3000 TSRA BKN008") == "YELLOW"
+        assert _classify_wx_tier("24010KT 3000 TSRA BKN008", None, []) == "YELLOW"
 
-    def test_tsra_only_in_prob_overlay_is_capped_to_yellow(self):
-        base = "VRB04KT CAVOK"
-        overlays = [{"type": "PROB30 TEMPO", "text": "27015G35KT TSRA", "window": "2014Z-2018Z"}]
+    def test_phenomena_alone_in_baseline_is_yellow_not_green(self):
+        # Clean vis/ceiling (9999 / SCT — SCT never counts as a ceiling)
+        # would be GREEN on numbers alone, but TSRA still floors to YELLOW.
+        assert _tier_for_text("24010KT 9999 SCT040 TSRA") == "YELLOW"
+
+    def test_phenomena_alone_in_tempo_overlay_is_yellow_not_red(self):
+        # VTCC/TG910 regression, exact fixture shape: baseline is clean
+        # (9999/SCT), and the only overlay is a light thunderstorm with no
+        # vis/ceiling restatement of its own (unchanged from baseline per
+        # TAF convention) — this must read YELLOW ("some awareness"), never
+        # RED, since RED requires vis/ceiling numbers to actually back it.
+        base = "35005KT 9999 SCT035"
+        overlays = [{"type": "TEMPO", "text": "-TSRA FEW025CB BKN035", "window": "1718Z-1802Z"}]
         assert _classify_wx_tier(base, None, overlays) == "YELLOW"
+
+    def test_severe_vis_in_prob_overlay_is_capped_to_orange(self):
+        # PROB is an explicit probability estimate, not a forecast
+        # commitment — even when its own vis/ceiling numbers are RED-level
+        # (1200m here), it's capped short of RED, elevated above YELLOW.
+        base = "VRB04KT CAVOK"
+        overlays = [{"type": "PROB30 TEMPO", "text": "27015G35KT 1200 TSRA BKN008", "window": "2014Z-2018Z"}]
+        assert _classify_wx_tier(base, None, overlays) == "ORANGE"
+
+    def test_severe_vis_in_bare_prob_is_capped_to_orange(self):
+        base = "VRB04KT CAVOK"
+        overlays = [{"type": "PROB40", "text": "27015G35KT 1200 TSRA BKN008", "window": "2014Z-2018Z"}]
+        assert _classify_wx_tier(base, None, overlays) == "ORANGE"
+
+    def test_severe_vis_in_plain_tempo_overlay_is_red(self):
+        # A plain TEMPO is a deterministic forecast change (just not yet
+        # started/in-progress), not a probability estimate — unlike an
+        # equivalent PROB overlay, it isn't capped: genuinely RED-level
+        # vis/ceiling numbers (1200m here) show as RED.
+        base = "VRB04KT CAVOK"
+        overlays = [{"type": "TEMPO", "text": "27015G35KT 1200 TSRA BKN008", "window": "2014Z-2018Z"}]
+        assert _classify_wx_tier(base, None, overlays) == "RED"
+
+    def test_low_vis_fog_in_tempo_overlay_is_red(self):
+        # UTAK/TG910 regression: TEMPO VV001 + 500m vis is RED-severity by
+        # vis/ceiling numbers alone (no phenomena keyword match on FG).
+        base = "33016G26KT 6000 SCT026 BKN100"
+        overlays = [{"type": "TEMPO", "text": "VRB02KT 0500 FG VV001", "window": "1722Z-1803Z"}]
+        assert _classify_wx_tier(base, None, overlays) == "RED"
+
+    def test_becmg_in_progress_into_severe_conditions_is_red(self):
+        # An in-progress BECMG is mid-transition right now — at least as
+        # certain as a TEMPO — so it scores at full severity, not capped.
+        # RED comes from vis 800 / ceiling 300ft, not from TSRA itself.
+        base = "24010KT 9999 SCT040"
+        becmg = {"text": "24020G35KT 800 TSRA BKN003", "window": "2014Z-2018Z"}
+        assert _classify_wx_tier(base, becmg, []) == "RED"
+
+    def test_becmg_in_progress_floor_stays_yellow(self):
+        # Mid-transition never reads as clean GREEN even when both end
+        # states are GREEN-level.
+        base = "24010KT CAVOK"
+        becmg = {"text": "25008KT CAVOK", "window": "2014Z-2018Z"}
+        assert _classify_wx_tier(base, becmg, []) == "YELLOW"
 
     def test_low_visibility_is_red(self):
         # LVO-class visibility.

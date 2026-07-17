@@ -330,17 +330,20 @@ def condense_taf(taf_raw, ref_dt):
 
 _CEILING_RE = re.compile(r"^(BKN|OVC|VV)(\d{3})$")
 _VIS_TOKEN_RE = re.compile(r"^\d{4}$")
-_WX_RED_RE = re.compile(r"\b(TS\w*|FZRA|FZDZ|FZFG|FC|SS|DS)\b")
+# Presence-only: matches regardless of intensity prefix (-/+) or count, and
+# a leading VC (vicinity, e.g. "VCTS") never matches since \b requires a
+# boundary immediately before "TS" — vicinity phenomena aren't at the field.
+_WX_PHENOMENA_RE = re.compile(r"\b(TS\w*|FZRA|FZDZ|FZFG|FC|SS|DS)\b")
 
-_TIER_RANK = {"GREEN": 0, "YELLOW": 1, "RED": 2}
+_TIER_RANK = {"GREEN": 0, "YELLOW": 1, "ORANGE": 2, "RED": 3}
 
 
 def _worse_tier(a, b):
     return a if _TIER_RANK[a] >= _TIER_RANK[b] else b
 
 
-def _cap_at_yellow(tier):
-    return tier if _TIER_RANK[tier] <= _TIER_RANK["YELLOW"] else "YELLOW"
+def _cap_at(tier, ceiling):
+    return tier if _TIER_RANK[tier] <= _TIER_RANK[ceiling] else ceiling
 
 
 def _vis_and_ceiling(toks):
@@ -378,18 +381,27 @@ def _tier_for_text(text):
     unrestricted vis/ceiling. A full-state string with neither a vis token
     nor CAVOK/NSC is ambiguous (real TAFs always state one) and defaults to
     YELLOW rather than silently passing as GREEN.
-    """
-    if _WX_RED_RE.search(text):
-        return "RED"
 
+    Severity is driven by vis/ceiling numbers alone — a phenomena keyword
+    (thunderstorm, freezing precip, funnel cloud, sand/duststorm; any
+    intensity) never elevates this past vis/ceiling's own verdict. It only
+    guarantees a YELLOW floor: vis/ceiling numbers are what a pilot can act
+    on operationally, but a phenomenon in play — even with clean vis/ceiling
+    — still deserves at least a caution flag, not a silent GREEN.
+    """
     toks = text.split()
     has_cavok = "CAVOK" in toks or "NSC" in toks
     vis_m, ceiling_ft = _vis_and_ceiling(toks)
 
     if vis_m is None and ceiling_ft is None and not has_cavok:
-        return "YELLOW"
+        tier = "YELLOW"
+    else:
+        tier = _tier_from_vis_ceiling(vis_m, ceiling_ft)
 
-    return _tier_from_vis_ceiling(vis_m, ceiling_ft)
+    if _WX_PHENOMENA_RE.search(text):
+        tier = _worse_tier(tier, "YELLOW")
+
+    return tier
 
 
 def _tier_for_partial_text(text):
@@ -399,34 +411,54 @@ def _tier_for_partial_text(text):
     Unlike _tier_for_text, a missing vis/ceiling token here is not ambiguous
     — TAF convention omits elements that aren't changing (e.g. a wind-only
     TEMPO carries no vis/cloud restriction of its own) — so it scores GREEN
-    (neutral), not YELLOW. A phenomena override still forces RED.
+    (neutral), not YELLOW, when neither is stated. Same phenomena floor as
+    _tier_for_text — see there for rationale.
     """
-    if _WX_RED_RE.search(text):
-        return "RED"
-
     vis_m, ceiling_ft = _vis_and_ceiling(text.split())
-    return _tier_from_vis_ceiling(vis_m, ceiling_ft)
+    tier = _tier_from_vis_ceiling(vis_m, ceiling_ft)
+
+    if _WX_PHENOMENA_RE.search(text):
+        tier = _worse_tier(tier, "YELLOW")
+
+    return tier
 
 
 def _classify_wx_tier(taf_base, becmg_in_progress, active_overlays):
-    """Worst-case severity tier for an airport at ref_dt.
+    """Worst-case severity tier for an airport at ref_dt. This is a planning
+    tool, not a nowcast — a deteriorating overlay must be visible as severe,
+    not smoothed down to a generic "caution" color, because dispatch plans
+    for the credible worst case, not just the most-likely one.
 
     taf_base holds at ref_dt (already folded by condense_taf) and is scored
-    at full severity. becmg_in_progress is also a folded full-state string,
-    but the airport is mid-transition when ref_dt falls inside it, so it's
-    capped at YELLOW and forces a YELLOW floor regardless of either
-    end-state. active_overlays are raw TEMPO/PROB/upcoming-FM diff-groups —
-    not certain/current at ref_dt, and not full-state — so they're scored
-    with _tier_for_partial_text and likewise capped at YELLOW.
+    at full severity (RED-capable). becmg_in_progress is also a folded
+    full-state string — the airport is mid-transition, which is at least as
+    certain as a TEMPO, so it's scored at full severity too, but still
+    forces a YELLOW floor regardless of either end-state (mid-transition
+    never reads as clean GREEN). active_overlays are raw TEMPO/PROB/FM/
+    upcoming-BECMG diff-groups scored with _tier_for_partial_text: TEMPO,
+    FM, and an upcoming BECMG are deterministic forecast changes (not yet
+    started, but not probabilistic either) and score at full severity.
+    PROB30/PROB40 (bare or combined with TEMPO) is an explicit probability
+    estimate, not a forecast commitment, and is capped at ORANGE — worse
+    than a plain "caution" YELLOW, but short of the certainty RED implies.
+
+    This certainty cap is orthogonal to phenomena severity: RED is reserved
+    for vis/ceiling numbers alone (see _tier_for_text / _tier_for_partial_text
+    docstrings) — a phenomena keyword never drives a group above YELLOW on
+    its own, so a PROB overlay's ORANGE cap in practice only ever bites when
+    its own vis/ceiling numbers are RED-level.
     """
     tier = _tier_for_text(taf_base) if taf_base else "YELLOW"
 
     if becmg_in_progress:
         tier = _worse_tier(tier, "YELLOW")
-        tier = _worse_tier(tier, _cap_at_yellow(_tier_for_text(becmg_in_progress["text"])))
+        tier = _worse_tier(tier, _tier_for_text(becmg_in_progress["text"]))
 
     for ov in active_overlays:
-        tier = _worse_tier(tier, _cap_at_yellow(_tier_for_partial_text(ov["text"])))
+        ov_tier = _tier_for_partial_text(ov["text"])
+        if "PROB" in ov["type"]:
+            ov_tier = _cap_at(ov_tier, "ORANGE")
+        tier = _worse_tier(tier, ov_tier)
 
     return tier
 
