@@ -80,6 +80,15 @@ class TestMergeAirportsLegs:
         wmkk = next(a for a in merged if a["icao"] == "WMKK")
         assert [l["leg"] for l in wmkk["legs"]] == [2]
 
+    def test_taf_base_src_survives_merge(self):
+        # Regression for the per-leg field whitelist in _merge_airports_legs —
+        # a field left out here silently vanishes in every Flask run even
+        # though the CLI/met_engine.py output has it (see HANDOFF.md gotcha 1).
+        leg1 = [{"icao": "VTBS", "lat": 1, "lon": 1,
+                 "taf_base_src": [{"t": "24008KT", "s": 21}]}]
+        merged = _merge_airports_legs([leg1])
+        assert merged[0]["legs"][0]["taf_base_src"] == [{"t": "24008KT", "s": 21}]
+
 
 class TestFirMarkerPosition:
     def test_skips_waypoint_near_airport(self):

@@ -45,8 +45,9 @@ document visible but blank, defeating the simultaneous-visibility rationale.
 MET elements tapping to the same block — the anchor key stays a bare ICAO (the MET document
 has a flat namespace, unlike NOTAM's owner|id). **Layered inside the block, ETA-window
 highlights** additionally fill the raw TAF groups relevant in each leg's ETA±1h window (the
-groups the panel shows as BECMG-in-progress / active overlays; the synthesized baseline is a
-fold of several source regions and is never filled). All legs' fills render simultaneously in
+groups the panel shows as BECMG-in-progress / active overlays; the synthesized baseline was
+originally never filled — see the Baseline Fills addendum below for how token-level
+provenance closed that gap). All legs' fills render simultaneously in
 the established leg colors with L1/L2 tags (single-leg airports: untagged, no legend) — the
 border-vs-fill distinction separates "the block you tapped" from "what matters at ETA".
 Group geometry is computed leg-agnostically at parse time for every TAF group, keyed by the
@@ -117,3 +118,37 @@ guaranteed identical in rendering.
 
 Rationale: click reduction without surrendering half the screen to every marker tap — the
 pane keeps ADR 0002's promise of layout predictability even as it becomes more automatic.
+
+## Addendum: Baseline Fills (2026-07-17)
+
+The original decision left `taf_base` — "conditions at ETA" — with no fill at all: it's a
+*derived* string (folding may pull the wind from a completed BECMG and vis/cloud from the
+original base line), so no single source region corresponds to it. This was a real gap: the
+one condition set a pilot cares about most (what's actually happening on arrival) was the one
+thing the Source Pane couldn't point at in the source document.
+
+**Token-level provenance, mirroring the existing `src_start` → `groups` mechanism exactly, one
+level down.** `met_engine._parse_groups()` now tokenizes the base region and each group's text
+(`{"t": token, "s": offset in taf_raw}`), and `condense_taf()`'s fold runs a token-level twin
+of `_fold_conditions()` (`_fold_conditions_toks()`) alongside the untouched string fold — same
+three branches (full restatement / wind-only with old wind / wind-only with no old wind),
+driven by the same `_is_pure_wind_change`/`_leading_wind` checks, so the two can never
+silently drift apart. The result, `taf_base_src`, is a token list in display order threaded
+onto each leg. `met_anchors.py` emits the geometric counterpart, `words` — one rect per PDF
+word, built from the same `offset_map` that already backs `groups`, behind the identical
+fidelity gate. The client resolves each token's `[s, s+len(t))` span against `words` by exact
+match; a miss draws nothing (the same graceful-miss rule as everywhere else in the Source
+Pane), and contiguous-in-source tokens sharing a PDF line merge into one rect so e.g.
+`9999 FEW020` reads as a single box.
+
+**Why not make `taf_base` itself a token list end-to-end** (replacing the string) — rejected:
+`condense_taf()`'s string output is the CLAUDE.md-validated regression fixture and several
+other call sites (`_classify_wx_tier`, the panel display) consume the string directly; keeping
+both representations, derived in lockstep rather than one replacing the other, meant the
+byte-identical output guarantee needed zero rework and the token version only had to prove
+itself equal to it in tests.
+
+**Why the baseline gets a distinct visual treatment** (`.src-fill-base`, solid 2px border vs.
+the ETA-window fills' 1px) — the two answer different questions ("what holds at ETA" vs. "what
+else is relevant within ETA±1h") and sharing one style would blur that distinction the same
+way sharing one highlight color blurs MET vs. NOTAM.

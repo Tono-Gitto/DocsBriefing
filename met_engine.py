@@ -163,6 +163,20 @@ def _fold_conditions(old, new):
     return f"{new} {old_rest}".strip() if old_rest else new
 
 
+def _fold_conditions_toks(old_toks, old_text, new_toks, new_text):
+    """Token-level mirror of _fold_conditions — same three branches, driven by
+    the same _is_pure_wind_change/_leading_wind checks on the text form, so the
+    two stay in lockstep by construction (see CLAUDE.md gotcha on
+    taf_base_src). Tests assert " ".join(t) over the result equals
+    _fold_conditions(old_text, new_text) rather than trusting this in isolation.
+    """
+    if not _is_pure_wind_change(new_text):
+        return list(new_toks)
+    if _leading_wind(old_text) is None:
+        return list(new_toks)
+    return list(new_toks) + list(old_toks[1:])
+
+
 def _resolve_ddhh(dd, hh, mm, anchor_dt):
     """Resolve a TAF day/hour(/minute) token to the UTC datetime nearest anchor_dt.
 
@@ -188,15 +202,28 @@ def _resolve_ddhh(dd, hh, mm, anchor_dt):
     return min(candidates, key=lambda c: abs(c - anchor_dt))
 
 
+_FT_HEADER_RE = re.compile(r"^FT\s+\S+\s+\S+\s*")
+
+
+def _tokenize(segment, base_offset):
+    """[{"t": token, "s": absolute offset in taf_raw}, ...] for each whitespace-
+    delimited token in segment, where base_offset is segment's own start offset
+    in taf_raw. Used to give the Source Pane word-level provenance for
+    taf_base_src (see CLAUDE.md "Source Pane" / met_anchors.py "words")."""
+    return [{"t": m.group(0), "s": base_offset + m.start()} for m in re.finditer(r"\S+", segment)]
+
+
 def _parse_groups(taf_raw, ref_dt):
     matches = list(_GROUP_RE.finditer(taf_raw))
-    if not matches:
-        # Strip header, return whole thing as base
-        base = re.sub(r"^FT\s+\S+\s+\S+\s*", "", taf_raw).strip()
-        return base, []
+    base_end = matches[0].start() if matches else len(taf_raw)
+    base_raw = taf_raw[:base_end]
+    hm = _FT_HEADER_RE.match(base_raw)
+    header_end = hm.end() if hm else 0
+    base_text = base_raw[header_end:].strip()
+    base_toks = _tokenize(base_raw[header_end:], header_end)
 
-    base_raw = taf_raw[: matches[0].start()]
-    base_text = re.sub(r"^FT\s+\S+\s+\S+\s*", "", base_raw).strip()
+    if not matches:
+        return base_text, base_toks, []
 
     groups = []
     for i, gm in enumerate(matches):
@@ -204,6 +231,7 @@ def _parse_groups(taf_raw, ref_dt):
         window = gm.group(2)
         text_end = matches[i + 1].start() if i + 1 < len(matches) else len(taf_raw)
         gtext = taf_raw[gm.end(): text_end].strip()
+        gtoks = _tokenize(taf_raw[gm.end(): text_end], gm.end())
 
         if gtype.startswith("FM"):
             # FM DDHHMM — time encoded in type token, no end
@@ -218,9 +246,9 @@ def _parse_groups(taf_raw, ref_dt):
             continue  # malformed
 
         groups.append({"type": gtype, "start": start, "end": end, "text": gtext,
-                        "src_start": gm.start()})
+                        "toks": gtoks, "src_start": gm.start()})
 
-    return base_text, groups
+    return base_text, base_toks, groups
 
 
 def _fmt_dt(dt):
@@ -233,16 +261,24 @@ def _fmt_window(start, end):
 
 def condense_taf(taf_raw, ref_dt):
     """
-    Returns (base_str, becmg_in_progress|None, [active_overlays]).
+    Returns (base_str, becmg_in_progress|None, [active_overlays], taf_base_src).
     BECMG/FM completed before ref_dt fold into the baseline.
     Overlays cover the OM-A §8.1.7.4.1(7) window: ETA ±1h.
     All group times are resolved to real datetimes so month/year boundaries
     compare correctly.
+
+    taf_base_src is the token-level provenance of base_str — a list of
+    {"t": token, "s": offset in taf_raw} in display order — threaded alongside
+    the string fold via _fold_conditions_toks so the Source Pane can highlight
+    exactly the source tokens that make up "conditions at ETA" (see CLAUDE.md
+    "Source Pane", met_anchors.py "words"). becmg_in_progress's display text is
+    not given token provenance — only the baseline is.
     """
-    base_text, groups = _parse_groups(taf_raw, ref_dt)
+    base_text, base_toks, groups = _parse_groups(taf_raw, ref_dt)
     win_start = ref_dt - timedelta(hours=1)
     win_end   = ref_dt + timedelta(hours=1)
     baseline  = base_text
+    baseline_toks = base_toks
     becmg_prog = None
     becmg_prog_base = base_text
     overlays   = []
@@ -254,11 +290,13 @@ def condense_taf(taf_raw, ref_dt):
         if t == "BECMG" or t.startswith("FM"):
             if g["end"] is None:              # FM: complete once past start
                 if ref_dt >= s:
+                    baseline_toks = _fold_conditions_toks(baseline_toks, baseline, g["toks"], g["text"])
                     baseline = _fold_conditions(baseline, g["text"])
                 elif s < win_end:             # FM starts within +1h → overlay
                     overlays.append(g)
             else:
                 if ref_dt >= g["end"]:
+                    baseline_toks = _fold_conditions_toks(baseline_toks, baseline, g["toks"], g["text"])
                     baseline = _fold_conditions(baseline, g["text"])  # fold
                 elif s <= ref_dt < g["end"]:
                     becmg_prog = g            # in progress right now
@@ -283,7 +321,7 @@ def condense_taf(taf_raw, ref_dt):
          "src_start": g["src_start"]}
         for g in overlays
     ]
-    return baseline, becmg_out, overlay_out
+    return baseline, becmg_out, overlay_out, baseline_toks
 
 
 # ── Weather severity tier (RED/YELLOW/GREEN) ─────────────────────────────────
@@ -417,9 +455,9 @@ def main():
         lat, lon = coords[icao]
         ref_dt, dist_nm = compute_ref_time(lat, lon, route_pts)
 
-        taf_base, becmg_prog, active_overlays = None, None, []
+        taf_base, becmg_prog, active_overlays, taf_base_src = None, None, [], None
         if d["taf_raw"]:
-            taf_base, becmg_prog, active_overlays = condense_taf(d["taf_raw"], ref_dt)
+            taf_base, becmg_prog, active_overlays, taf_base_src = condense_taf(d["taf_raw"], ref_dt)
         wx_tier = _classify_wx_tier(taf_base, becmg_prog, active_overlays)
 
         out.append({
@@ -435,6 +473,7 @@ def main():
             "metar": d["metar"],
             "taf_raw": d["taf_raw"],
             "taf_base": taf_base,
+            "taf_base_src": taf_base_src,
             "becmg_in_progress": becmg_prog,
             "active_overlays": active_overlays,
             "wx_tier": wx_tier,

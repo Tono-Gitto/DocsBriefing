@@ -36,9 +36,15 @@ detail. See `CLAUDE.md` for architecture and `docs/adr/` for decisions.
 - **ETA-Window Highlight** — a translucent leg-colored fill drawn inside a highlighted MET
   Block over each raw TAF group that is operationally relevant in a leg's ETA±1h window
   (the groups the panel shows as BECMG-in-progress or active overlays). All legs' fills show
-  at once, tagged L1/L2 when the airport has more than one leg; the synthesized baseline and
-  out-of-window groups are never filled. A fill that cannot be located precisely is omitted,
-  never approximated.
+  at once, tagged L1/L2 when the airport has more than one leg; out-of-window groups are
+  never filled. A fill that cannot be located precisely is omitted, never approximated.
+- **Baseline Fill** — a translucent leg-colored fill drawn over the exact source tokens that
+  make up "conditions at ETA" (`taf_base`) — a solid border distinguishes it from the thinner
+  ETA-Window Highlight. Unlike the ETA-Window Highlight (which fills a whole raw TAF group),
+  `taf_base` is a *derived* string with no single source region, so this fill works token by
+  token: each token's source offset is resolved to its own word rect and adjacent, same-line
+  tokens are merged into one rect. A token that can't be resolved is simply not filled — same
+  graceful-miss rule as everywhere else in the Source Pane.
 - **Owner** — the entity a NOTAM is attributed to: an airport (ICAO), a FIR, or a
   flight-wide section (GENERAL / FLIGHT LEG / AEROPLANE). The same NOTAM id can appear
   under different owners; owner + id identifies one anchored occurrence.

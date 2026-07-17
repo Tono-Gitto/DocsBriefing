@@ -249,6 +249,7 @@ def _merge_airports_legs(leg_airports_list):
                 "ref_time":          ap.get("ref_time", "0000Z"),
                 "ref_iso":           ap.get("ref_iso"),
                 "taf_base":          ap.get("taf_base"),
+                "taf_base_src":      ap.get("taf_base_src"),
                 "becmg_in_progress": ap.get("becmg_in_progress"),
                 "active_overlays":   ap.get("active_overlays", []),
                 "wx_tier":           ap.get("wx_tier", "YELLOW"),

@@ -182,6 +182,13 @@
       border-radius: 2px;
       pointer-events: none;
     }
+    /* Baseline ("at ETA") token fills: same translucent leg color as .src-fill,
+       but a thicker solid border distinguishes "holds at ETA" from the ETA±1h
+       window fills above. */
+    .src-fill-base {
+      border-width: 2px;
+      border-style: solid;
+    }
     .src-fill-tag {
       position: absolute;
       top: 0; left: 0;
@@ -735,6 +742,7 @@ function _legsFor(ap) {
     leg: 1,
     ref_time:          ap.ref_time,
     taf_base:          ap.taf_base,
+    taf_base_src:      ap.taf_base_src,
     becmg_in_progress: ap.becmg_in_progress,
     active_overlays:   ap.active_overlays || [],
     notams:            ap.notams || [],
@@ -750,17 +758,84 @@ function _updateMetLegend(multiLeg) {
   el.innerHTML =
     `<span><span class="swatch" style="background:${ROUTE_COLORS[0]}"></span>L1</span>` +
     `<span><span class="swatch" style="background:${ROUTE_COLORS[1]}"></span>L2</span>` +
-    `<span>= ETA±1h</span>`;
+    `<span>solid = at ETA, thin = ETA±1h</span>`;
   el.classList.add('show');
+}
+
+// Two word rects are on the same physical PDF line iff they share a page and
+// vertical band — the same test _words_to_group_rects uses server-side to
+// decide what counts as "one line" for merging.
+function _sameLine(a, b) {
+  return a.page === b.page && a.y0 === b.y0 && a.y1 === b.y1;
+}
+
+function _unionRect(a, b) {
+  return { page: a.page, y0: a.y0, y1: a.y1, x0: Math.min(a.x0, b.x0), x1: Math.max(a.x1, b.x1) };
+}
+
+function _appendMetFill(color, rect, extraCls, tag) {
+  const pageEl = document.getElementById(`src-page-met-${rect.page}`);
+  if (!pageEl) return;
+  const fill = document.createElement('div');
+  fill.className = extraCls ? `src-fill ${extraCls}` : 'src-fill';
+  _positionRect(fill, rect);
+  fill.style.background = _rgba(color, 0.32);
+  fill.style.border = `${extraCls === 'src-fill-base' ? 2 : 1}px solid ${color}`;
+  if (tag) {
+    const tagEl = document.createElement('span');
+    tagEl.className = 'src-fill-tag';
+    tagEl.textContent = tag;
+    tagEl.style.background = color;
+    tagEl.style.color = '#0d0e1c';
+    fill.appendChild(tagEl);
+  }
+  pageEl.appendChild(fill);
+  _srcPane.docs.met.highlightEls.push(fill);
+}
+
+// Baseline ("conditions at ETA") token fills: taf_base_src is a token list
+// {t, s} in taf_raw-offset space; entry.words is [[start, end, rect], ...] in
+// the same offset space (see met_engine.py taf_base_src, met_anchors.py
+// "words"). A token whose exact [s, s+t.length) span isn't in entry.words is
+// a graceful miss — draw nothing, never approximate (docs/adr/0001, 0002).
+function _drawMetBaselineFills(color, taps, words, multiLeg, legNum) {
+  if (!taps.length || !words.length) return;
+  const byStart = new Map(words.map(w => [w[0], w]));
+
+  const resolved = [];
+  taps.forEach(tok => {
+    const end = tok.s + tok.t.length;
+    const w = byStart.get(tok.s);
+    if (w && w[1] === end) resolved.push({ s: tok.s, e: end, rect: w[2] });
+  });
+
+  // Merge tokens that are contiguous in source AND share a PDF line into one
+  // rect (text-selection style) — e.g. "9999 FEW020" reads as one clean box.
+  const merged = [];
+  resolved.forEach(r => {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.e + 1 === r.s && _sameLine(prev.rect, r.rect)) {
+      prev.rect = _unionRect(prev.rect, r.rect);
+      prev.e = r.e;
+    } else {
+      merged.push({ s: r.s, e: r.e, rect: r.rect });
+    }
+  });
+
+  merged.forEach((m, i) => {
+    _appendMetFill(color, m.rect, 'src-fill-base', multiLeg && i === 0 ? `L${legNum}` : null);
+  });
 }
 
 // ETA-window highlights: for each leg, the raw TAF groups behind the panel's
 // BECMG-in-progress / active-overlay sections get a translucent leg-colored
-// fill inside the already-drawn block border. A lookup miss (no groups for
-// this airport, or an offset the anchor pass didn't resolve) draws nothing —
-// never approximate (see docs/adr/0001, docs/adr/0002).
+// fill inside the already-drawn block border, plus token-level fills for the
+// conditions actually holding at ETA (taf_base_src). A lookup miss (no groups
+// for this airport, or an offset the anchor pass didn't resolve) draws
+// nothing — never approximate (see docs/adr/0001, docs/adr/0002).
 function _drawMetEtaFills(icao, entry) {
   const groups = entry.groups || {};
+  const words = entry.words || [];
   const ap = (_navAirports || []).find(a => a.icao === icao);
   if (!ap) { _updateMetLegend(false); return; }
 
@@ -780,26 +855,10 @@ function _drawMetEtaFills(icao, entry) {
     spans.forEach(srcStart => {
       const rects = groups[String(srcStart)];
       if (!rects) return;
-      rects.forEach(r => {
-        const pageEl = document.getElementById(`src-page-met-${r.page}`);
-        if (!pageEl) return;
-        const fill = document.createElement('div');
-        fill.className = 'src-fill';
-        _positionRect(fill, r);
-        fill.style.background = _rgba(color, 0.32);
-        fill.style.border = `1px solid ${color}`;
-        if (multiLeg) {
-          const tag = document.createElement('span');
-          tag.className = 'src-fill-tag';
-          tag.textContent = `L${leg.leg}`;
-          tag.style.background = color;
-          tag.style.color = '#0d0e1c';
-          fill.appendChild(tag);
-        }
-        pageEl.appendChild(fill);
-        _srcPane.docs.met.highlightEls.push(fill);
-      });
+      rects.forEach(r => _appendMetFill(color, r, null, multiLeg ? `L${leg.leg}` : null));
     });
+
+    _drawMetBaselineFills(color, leg.taf_base_src || [], words, multiLeg, leg.leg);
   });
 
   _updateMetLegend(multiLeg);

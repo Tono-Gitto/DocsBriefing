@@ -174,6 +174,42 @@ class TestMetAnchors:
         _, page_sizes = parsed
         assert len(page_sizes) == 7
 
+    def test_words_present_for_all_taf_airports(self, parsed, met_airports):
+        # Same fidelity-gate parity as "groups": every airport with a TAF that
+        # reconstructs cleanly gets word-level geometry too (see met_anchors.py
+        # "words", HANDOFF.md — Baseline Fills).
+        anchors, _ = parsed
+        airports, order = met_airports
+        for icao in order:
+            if airports[icao]["taf_raw"] is None:
+                continue
+            if "groups" in anchors[icao]:
+                assert "words" in anchors[icao], f"{icao}: groups present but words missing"
+
+    def test_vtbu_baseline_offsets_resolve_to_matching_words(self, parsed):
+        # HANDOFF.md worked example: VTBU's folded baseline is
+        # "36003KT 9999 FEW020" at taf_raw offsets 57, 29, 34.
+        from datetime import datetime, timezone
+        import sys
+        sys.path.insert(0, ROOT)
+        from met_engine import parse_met_pdf, condense_taf
+
+        anchors, _ = parsed
+        airports, _ = parse_met_pdf(FIXTURE_MET)
+        taf = airports["VTBU"]["taf_raw"]
+        ref_dt = datetime(2026, 6, 20, 23, 26, tzinfo=timezone.utc)
+        base, _, _, toks = condense_taf(taf, ref_dt)
+        assert base == "36003KT 9999 FEW020"
+
+        words = anchors["VTBU"]["words"]
+        by_start = {w[0]: w for w in words}
+        for tok in toks:
+            end = tok["s"] + len(tok["t"])
+            assert tok["s"] in by_start, f"no word at offset {tok['s']} for {tok['t']!r}"
+            w = by_start[tok["s"]]
+            assert w[1] == end, f"word span mismatch for {tok['t']!r}: {w}"
+            assert taf[tok["s"]:end] == tok["t"]
+
 
 @pytest.mark.integration
 class TestNotamAnchors:

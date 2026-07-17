@@ -15,6 +15,10 @@ from met_engine import (
 )
 
 
+def _joined(toks):
+    return " ".join(t["t"] for t in toks)
+
+
 def _dt(y, mo, d, h, mi=0):
     return datetime(y, mo, d, h, mi, tzinfo=timezone.utc)
 
@@ -26,7 +30,7 @@ class TestFolding:
     def test_completed_becmg_folds_into_baseline(self):
         # Wind-only BECMG carries the base visibility/cloud forward.
         taf = BASE_TAF + " BECMG 2008/2010 25015KT"
-        base, becmg, overlays = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        base, becmg, overlays, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
         assert base == "25015KT 9999 FEW020"
         assert becmg is None
         assert overlays == []
@@ -34,20 +38,20 @@ class TestFolding:
     def test_becmg_in_progress_not_folded(self):
         # In-progress wind-only BECMG shows the full target conditions.
         taf = BASE_TAF + " BECMG 2008/2010 25015KT"
-        base, becmg, overlays = condense_taf(taf, _dt(2026, 6, 20, 9, 0))
+        base, becmg, overlays, _ = condense_taf(taf, _dt(2026, 6, 20, 9, 0))
         assert base == "20010KT 9999 FEW020"
         assert becmg is not None and becmg["text"] == "25015KT 9999 FEW020"
 
     def test_upcoming_becmg_within_one_hour_is_overlay(self):
         taf = BASE_TAF + " BECMG 2008/2010 25015KT"
-        base, becmg, overlays = condense_taf(taf, _dt(2026, 6, 20, 7, 30))
+        base, becmg, overlays, _ = condense_taf(taf, _dt(2026, 6, 20, 7, 30))
         assert base == "20010KT 9999 FEW020"
         assert becmg is None
         assert len(overlays) == 1 and overlays[0]["text"] == "25015KT"
 
     def test_fm_folds_once_start_passed(self):
         taf = BASE_TAF + " FM201800 26005KT 4000 FU SCT100 FM210400 30010KT"
-        base, becmg, overlays = condense_taf(taf, _dt(2026, 6, 20, 19, 17))
+        base, becmg, overlays, _ = condense_taf(taf, _dt(2026, 6, 20, 19, 17))
         assert base == "26005KT 4000 FU SCT100"
         assert becmg is None
         assert overlays == []  # FM210400 far in the future
@@ -56,7 +60,7 @@ class TestFolding:
         # Both BECMGs are wind-only: base carries 9999 FEW020, and the
         # in-progress second BECMG folds onto the already-folded baseline.
         taf = BASE_TAF + " BECMG 2008/2010 25015KT BECMG 2014/2016 30008KT"
-        base, becmg, overlays = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        base, becmg, overlays, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
         assert base == "25015KT 9999 FEW020"
         assert becmg is not None and becmg["text"] == "30008KT 9999 FEW020"
 
@@ -68,14 +72,14 @@ class TestSourceSpans:
 
     def test_tempo_overlay_src_start_points_at_tempo_token(self):
         taf = BASE_TAF + " TEMPO 2006/2008 3000 TSRA"
-        base, becmg, overlays = condense_taf(taf, _dt(2026, 6, 20, 6, 30))
+        base, becmg, overlays, _ = condense_taf(taf, _dt(2026, 6, 20, 6, 30))
         assert len(overlays) == 1
         s = overlays[0]["src_start"]
         assert taf[s:].startswith("TEMPO")
 
     def test_becmg_in_progress_src_start_points_at_becmg_token(self):
         taf = BASE_TAF + " BECMG 2008/2010 25015KT"
-        base, becmg, overlays = condense_taf(taf, _dt(2026, 6, 20, 9, 0))
+        base, becmg, overlays, _ = condense_taf(taf, _dt(2026, 6, 20, 9, 0))
         assert becmg is not None
         s = becmg["src_start"]
         assert taf[s:].startswith("BECMG")
@@ -84,7 +88,7 @@ class TestSourceSpans:
         # condense_taf normalizes the output "type" to "FM" (dropping the DDHHMM
         # digits), but src_start must still point at the raw "FM201800..." token.
         taf = BASE_TAF + " FM201800 26005KT 4000 FU SCT100"
-        base, becmg, overlays = condense_taf(taf, _dt(2026, 6, 20, 17, 30))
+        base, becmg, overlays, _ = condense_taf(taf, _dt(2026, 6, 20, 17, 30))
         assert len(overlays) == 1
         assert overlays[0]["type"] == "FM"
         s = overlays[0]["src_start"]
@@ -97,33 +101,33 @@ class TestWindOnlyFold:
 
     def test_wind_only_becmg_carries_vis_and_cloud(self):
         taf = "FT 200500Z 2006/2112 24008KT 9999 SCT020 BECMG 2008/2010 34005KT"
-        base, becmg, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        base, becmg, _, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
         assert base == "34005KT 9999 SCT020"
         assert becmg is None
 
     def test_wind_only_becmg_carries_cavok(self):
         taf = "FT 200500Z 2006/2112 20005KT CAVOK BECMG 2008/2010 04004KT"
-        base, _, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        base, _, _, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
         assert base == "04004KT CAVOK"
 
     def test_wind_only_fm_carries_forward(self):
         taf = "FT 200500Z 2006/2112 24008KT 9999 SCT020 FM201200 34005KT"
-        base, _, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        base, _, _, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
         assert base == "34005KT 9999 SCT020"
 
     def test_gust_token_is_wind_only(self):
         taf = "FT 200500Z 2006/2112 24008KT 9999 SCT020 BECMG 2008/2010 34005G20KT"
-        base, _, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        base, _, _, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
         assert base == "34005G20KT 9999 SCT020"
 
     def test_non_wind_only_becmg_replaces(self):
         taf = "FT 200500Z 2006/2112 24008KT 9999 SCT020 BECMG 2008/2010 30010KT 4000 BR"
-        base, _, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        base, _, _, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
         assert base == "30010KT 4000 BR"
 
     def test_in_progress_wind_only_becmg_merged(self):
         taf = "FT 200500Z 2006/2112 24008KT 9999 SCT020 BECMG 2014/2016 34005KT"
-        _, becmg, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        _, becmg, _, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
         assert becmg is not None and becmg["text"] == "34005KT 9999 SCT020"
 
     def test_is_pure_wind_change(self):
@@ -144,17 +148,17 @@ class TestWindOnlyFold:
 class TestOverlayWindow:
     def test_tempo_overlapping_eta_window_shown(self):
         taf = BASE_TAF + " TEMPO 2014/2018 5000 RA"
-        _, _, overlays = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        _, _, overlays, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
         assert len(overlays) == 1 and overlays[0]["type"] == "TEMPO"
 
     def test_tempo_ending_before_window_hidden(self):
         taf = BASE_TAF + " TEMPO 2010/2013 5000 RA"
-        _, _, overlays = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        _, _, overlays, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
         assert overlays == []
 
     def test_prob30_tempo_parsed_as_one_group(self):
         taf = BASE_TAF + " PROB30 TEMPO 2014/2018 TSRA"
-        _, _, overlays = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        _, _, overlays, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
         assert len(overlays) == 1
         assert overlays[0]["type"] == "PROB30 TEMPO"
         assert overlays[0]["text"] == "TSRA"
@@ -166,7 +170,7 @@ class TestMonthBoundary:
     def test_future_becmg_next_month_not_folded(self):
         # Ref 30 Jun 23:00 — BECMG 0104/0106 is 1 Jul, five hours ahead.
         taf = "FT 301700Z 3018/0118 20010KT 9999 FEW020 BECMG 0104/0106 25015KT"
-        base, becmg, overlays = condense_taf(taf, _dt(2026, 6, 30, 23, 0))
+        base, becmg, overlays, _ = condense_taf(taf, _dt(2026, 6, 30, 23, 0))
         assert base == "20010KT 9999 FEW020"
         assert becmg is None
         assert overlays == []
@@ -174,33 +178,33 @@ class TestMonthBoundary:
     def test_tempo_spanning_month_end_shown_after_midnight(self):
         # Ref 1 Jul 00:30 — TEMPO 3023/0101 is still active.
         taf = "FT 301700Z 3018/0118 20010KT 9999 FEW020 TEMPO 3023/0101 5000 RA"
-        _, _, overlays = condense_taf(taf, _dt(2026, 7, 1, 0, 30))
+        _, _, overlays, _ = condense_taf(taf, _dt(2026, 7, 1, 0, 30))
         assert len(overlays) == 1 and overlays[0]["text"] == "5000 RA"
 
     def test_becmg_completed_before_month_rollover_folds(self):
         # Ref 1 Jul 00:30 — BECMG ended 30 Jun 22:00, transition complete.
         taf = "FT 301700Z 3018/0118 20010KT 9999 FEW020 BECMG 3020/3022 25015KT"
-        base, becmg, _ = condense_taf(taf, _dt(2026, 7, 1, 0, 30))
+        base, becmg, _, _ = condense_taf(taf, _dt(2026, 7, 1, 0, 30))
         assert base == "25015KT 9999 FEW020"
         assert becmg is None
 
     def test_hour_24_window_token(self):
         # 3018/3024 ends at 1 Jul 00:00; by 00:30 it has folded.
         taf = "FT 301700Z 3018/0118 20010KT 9999 FEW020 BECMG 3022/3024 25015KT"
-        base, becmg, _ = condense_taf(taf, _dt(2026, 7, 1, 0, 30))
+        base, becmg, _, _ = condense_taf(taf, _dt(2026, 7, 1, 0, 30))
         assert base == "25015KT 9999 FEW020"
         assert becmg is None
 
     def test_year_boundary(self):
         # Ref 1 Jan 00:30 — TEMPO 3123/0101 (31 Dec → 1 Jan) still active.
         taf = "FT 311700Z 3118/0118 20010KT 9999 FEW020 TEMPO 3123/0101 5000 RA"
-        _, _, overlays = condense_taf(taf, _dt(2027, 1, 1, 0, 30))
+        _, _, overlays, _ = condense_taf(taf, _dt(2027, 1, 1, 0, 30))
         assert len(overlays) == 1 and overlays[0]["text"] == "5000 RA"
 
 
 class TestNoGroups:
     def test_taf_without_groups_returns_whole_base(self):
-        base, becmg, overlays = condense_taf(BASE_TAF, _dt(2026, 6, 20, 15, 0))
+        base, becmg, overlays, _ = condense_taf(BASE_TAF, _dt(2026, 6, 20, 15, 0))
         assert base == "20010KT 9999 FEW020"
         assert becmg is None and overlays == []
 
@@ -264,3 +268,76 @@ class TestWxTierSynthetic:
         base = "12010KT 9999 FEW015 SCT025"
         overlays = [{"type": "TEMPO", "text": "27010KT", "window": "3004Z-3009Z"}]
         assert _classify_wx_tier(base, None, overlays) == "GREEN"
+
+
+class TestTokenProvenance:
+    """taf_base_src — token-level provenance for taf_base, threaded through
+    condense_taf alongside the (unchanged) string fold so the Source Pane can
+    highlight the exact source tokens behind "conditions at ETA" (see
+    CLAUDE.md "Source Pane", HANDOFF.md worked example)."""
+
+    def test_vtbu_worked_example(self):
+        # First BECMG (wind-only) has completed by ref; its wind folds onto
+        # the original base's vis/cloud. Second BECMG is still in the future.
+        taf = ("FT 200500Z 2006/2106 24004KT 9999 FEW020 "
+               "BECMG 2014/2016 36003KT BECMG 2101/2103 20006KT")
+        base, becmg, overlays, toks = condense_taf(taf, _dt(2026, 6, 20, 23, 26))
+        assert base == "36003KT 9999 FEW020"
+        assert toks == [
+            {"t": "36003KT", "s": 57},
+            {"t": "9999", "s": 29},
+            {"t": "FEW020", "s": 34},
+        ]
+
+    def test_full_restatement_offsets_all_from_group(self):
+        # A BECMG that also restates vis/weather replaces the baseline wholesale
+        # — every taf_base_src token must point into the BECMG's own region,
+        # none carried forward from the original base line.
+        taf = "FT 200500Z 2006/2112 24008KT 9999 SCT020 BECMG 2008/2010 30010KT 4000 BR"
+        base, becmg, overlays, toks = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        assert base == "30010KT 4000 BR"
+        assert toks == [
+            {"t": "30010KT", "s": 57},
+            {"t": "4000", "s": 65},
+            {"t": "BR", "s": 70},
+        ]
+
+    def test_no_groups_yields_base_region_offsets_only(self):
+        taf = "FT 200500Z 2006/2112 20010KT 9999 FEW020"
+        base, becmg, overlays, toks = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        assert base == "20010KT 9999 FEW020"
+        assert toks == [
+            {"t": "20010KT", "s": 21},
+            {"t": "9999", "s": 29},
+            {"t": "FEW020", "s": 34},
+        ]
+
+    def test_wind_only_fold_with_variation_token_keeps_both_new_tokens(self):
+        # Pure wind change with a 250V310-style variation token: both new
+        # tokens are kept, followed by the old base's carried-forward rest.
+        taf = "FT 200500Z 2006/2112 24008KT 9999 SCT020 BECMG 2008/2010 36003KT 330V030"
+        base, becmg, overlays, toks = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        assert base == "36003KT 330V030 9999 SCT020"
+        assert toks == [
+            {"t": "36003KT", "s": 57},
+            {"t": "330V030", "s": 65},
+            {"t": "9999", "s": 29},
+            {"t": "SCT020", "s": 34},
+        ]
+
+    def test_joined_taf_base_src_always_equals_taf_base(self):
+        """Property check across a spread of existing fixture TAFs/ref times:
+        joining taf_base_src's tokens must always reproduce taf_base exactly."""
+        cases = [
+            (BASE_TAF + " BECMG 2008/2010 25015KT", _dt(2026, 6, 20, 15, 0)),
+            (BASE_TAF + " BECMG 2008/2010 25015KT", _dt(2026, 6, 20, 9, 0)),
+            (BASE_TAF + " BECMG 2008/2010 25015KT BECMG 2014/2016 30008KT", _dt(2026, 6, 20, 15, 0)),
+            (BASE_TAF + " FM201800 26005KT 4000 FU SCT100 FM210400 30010KT", _dt(2026, 6, 20, 19, 17)),
+            ("FT 200500Z 2006/2112 24008KT 9999 SCT020 BECMG 2008/2010 34005KT", _dt(2026, 6, 20, 15, 0)),
+            ("FT 200500Z 2006/2112 20005KT CAVOK BECMG 2008/2010 04004KT", _dt(2026, 6, 20, 15, 0)),
+            ("FT 301700Z 3018/0118 20010KT 9999 FEW020 BECMG 0104/0106 25015KT", _dt(2026, 6, 30, 23, 0)),
+            (BASE_TAF, _dt(2026, 6, 20, 15, 0)),
+        ]
+        for taf, ref in cases:
+            base, _, _, toks = condense_taf(taf, ref)
+            assert _joined(toks) == base, f"mismatch for {taf!r} @ {ref}"

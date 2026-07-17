@@ -56,11 +56,29 @@ def _words_to_group_rects(word_hits, page_sizes):
     return rects
 
 
+def _word_rect(page_idx, x0, x1, top, bottom, page_sizes):
+    """Normalized rect for a single word — same vertical padding as block/group
+    rects, but never merged across words (a word never crosses lines)."""
+    pw, ph = page_sizes[page_idx]
+    pad = _Y_PAD_FRAC * ph
+    y0 = max(0.0, top - pad)
+    y1 = min(ph, bottom + pad)
+    return {
+        "page": page_idx + 1,
+        "x0": round(x0 / pw, 4),
+        "y0": round(y0 / ph, 4),
+        "x1": round(x1 / pw, 4),
+        "y1": round(y1 / ph, 4),
+    }
+
+
 def extract_anchors(pdf_path):
     """Position-aware pass over the MET PDF.
 
     Returns:
-      anchors:    {icao: {"block": [rect, ...], "groups": {"<src_start>": [rect, ...]}}}
+      anchors:    {icao: {"block": [rect, ...],
+                           "groups": {"<src_start>": [rect, ...]},
+                           "words": [[start, end, rect], ...]}}
       page_sizes: [ (width_pt, height_pt), ... ]                  per page, PDF points
     """
     anchors = {}
@@ -84,9 +102,11 @@ def extract_anchors(pdf_path):
         nonlocal cur_icao, cur_block_lines, ft_lines, ft_capturing
         if cur_icao and cur_block_lines and cur_icao not in anchors:  # first occurrence wins
             entry = {"block": _lines_to_rects(cur_block_lines, page_sizes)}
-            groups = _extract_group_rects(ft_lines, page_sizes, words_for_page, pages)
-            if groups is not None:
+            result = _extract_group_rects(ft_lines, page_sizes, words_for_page, pages)
+            if result is not None:
+                groups, words = result
                 entry["groups"] = groups
+                entry["words"] = words
             anchors[cur_icao] = entry
         cur_icao = None
         cur_block_lines = []
@@ -131,7 +151,10 @@ def _extract_group_rects(ft_lines, page_sizes, words_for_page, pages):
     """Reconstruct FT text two ways — from line text (ground truth, matches
     parse_met_pdf's own reconstruction) and from words (carries geometry) — and
     only trust word geometry if both reconstructions agree character-for-character.
-    Returns {src_start: [rect, ...]} or None if the fidelity gate failed."""
+    Returns ({src_start: [rect, ...]}, [[start, end, rect], ...]) or None if the
+    fidelity gate failed. The word list gives the Source Pane per-word geometry
+    for taf_base_src (met_engine.py) — same offsets as taf_raw by construction,
+    since word_recon is validated character-identical to it."""
     if not ft_lines:
         return None
 
@@ -180,4 +203,14 @@ def _extract_group_rects(ft_lines, page_sizes, words_for_page, pages):
         if hits:
             groups[str(start)] = _words_to_group_rects(hits, page_sizes)
 
-    return groups
+    # Per-word geometry, clipped to word_recon's valid (post "=" trim) length so
+    # offsets line up 1:1 with met_engine's own tokenization of taf_raw.
+    valid_len = len(word_recon)
+    words = []
+    for (ws, we, x0, x1, top, bottom, page_idx, line_key) in offset_map:
+        if ws >= valid_len:
+            continue
+        words.append([ws, min(we, valid_len), _word_rect(page_idx, x0, x1, top, bottom, page_sizes)])
+    words.sort(key=lambda w: w[0])
+
+    return groups, words
