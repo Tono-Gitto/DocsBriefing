@@ -364,7 +364,7 @@ def _tier_from_vis_ceiling(vis_m, ceiling_ft):
         vis_m = 9999
     if ceiling_ft is None:
         ceiling_ft = 999999
-    if vis_m < 1600 or ceiling_ft < 500:
+    if vis_m < 2400 or ceiling_ft < 500:
         return "RED"
     if vis_m < 5000 or ceiling_ft < 2000:
         return "YELLOW"

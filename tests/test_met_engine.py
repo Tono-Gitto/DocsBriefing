@@ -217,7 +217,7 @@ class TestWxTierFixtureAnchors:
         assert _classify_wx_tier("23007KT 9999 SCT040", None, []) == "GREEN"
 
     def test_opla_yellow(self):
-        # 26005KT 4000 FU SCT100 — vis 4000 falls in the 1600-4999 band.
+        # 26005KT 4000 FU SCT100 — vis 4000 falls in the 2400-4999 band.
         assert _classify_wx_tier("26005KT 4000 FU SCT100", None, []) == "YELLOW"
 
     def test_opkc_yellow_becmg_in_progress(self):
