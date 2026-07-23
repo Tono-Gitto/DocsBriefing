@@ -30,7 +30,7 @@ import pdfplumber
 from dotenv import load_dotenv
 from _utils import HAIKU_MODEL
 from flask import (
-    Flask, Response, redirect, render_template_string, request,
+    Flask, Response, jsonify, redirect, render_template_string, request,
     send_file, send_from_directory,
 )
 from werkzeug.utils import secure_filename
@@ -691,6 +691,8 @@ def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
             _progress("Source documents ready.")
         except Exception as exc:
             _progress(f"⚠ source-document rendering failed — source pane unavailable ({type(exc).__name__})")
+        # NOTE: the HIRA brief is generated on demand (POST /api/hira), not here —
+        # keeps uploads fast and spends AI tokens only when the crew opens the brief.
 
         with _lock:
             _current_run["status"] = "done"
@@ -835,6 +837,42 @@ def serve_group_data(group, filename):
         # send_from_directory rejects path traversal and 404s missing files
         return send_from_directory(os.path.join(RUNS_DIR, run_id, str(group)), filename)
     return Response("Not found", status=404)
+
+
+@app.route("/api/hira", methods=["POST"])
+def generate_hira():
+    """On-demand HIRA brief for the current run (triggered by the map's HIRA button).
+
+    Whole-flight, so it spans every group dir. Cache-first: if hira.json already exists
+    it's returned as-is (no API call); otherwise Sonnet is called and the result cached
+    into every group dir. A generation failure returns 503 and caches nothing, so the
+    client's Retry re-attempts.
+    """
+    with _lock:
+        run_id = _current_run.get("run_id")
+        status = _current_run.get("status")
+    if not (run_id and status == "done"):
+        return jsonify({"error": "no completed run"}), 404
+
+    run_dir = os.path.join(RUNS_DIR, run_id)
+    group_dirs = sorted(
+        os.path.join(run_dir, d) for d in os.listdir(run_dir)
+        if os.path.isdir(os.path.join(run_dir, d))
+    )
+    if not group_dirs:
+        return jsonify({"error": "run has no group data"}), 404
+
+    # Cache hit — return the already-generated brief without another API call.
+    cached_path = os.path.join(group_dirs[0], "hira.json")
+    if os.path.exists(cached_path):
+        with open(cached_path) as f:
+            return jsonify(json.load(f)), 200
+
+    import hira_engine
+    payload = hira_engine.generate(group_dirs)
+    if payload is None:
+        return jsonify({"error": "AI synthesis unavailable — retry"}), 503
+    return jsonify(payload), 200
 
 
 @app.route("/data/<filename>")

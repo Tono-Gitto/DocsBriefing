@@ -374,6 +374,92 @@
     #flightBadge.badge-t1 { display: inline-block; background: #4a1010; color: #ff8080; }
     #flightBadge.badge-t2 { display: inline-block; background: #3a2a00; color: #ffc060; }
 
+    /* ── HIRA button + risk dot ── */
+    #hiraBtn {
+      background: #1a1c3a; border: 1px solid #2a2d50;
+      border-radius: 6px; padding: 6px 14px;
+      font-size: 0.82rem; font-weight: 700;
+      letter-spacing: 0.1em; color: #a0c8ff;
+      cursor: pointer; touch-action: manipulation;
+      display: flex; align-items: center; gap: 6px;
+      white-space: nowrap;
+    }
+    #hiraBtn:hover  { background: #22254a; border-color: #4a5080; }
+    #hiraBtn:active { background: #2a2e58; }
+    #hiraDot {
+      width: 11px; height: 11px; border-radius: 50%;
+      box-shadow: 0 0 6px currentColor;
+      display: none; flex-shrink: 0;   /* shown + colored only once a risk is known */
+    }
+    #hiraDot.on { display: inline-block; }
+
+    /* ── HIRA generation states (spinner / error) ── */
+    #hiraBody.is-status {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 16px; text-align: center; color: #8a92b0; min-height: 160px;
+    }
+    .hira-spinner {
+      width: 34px; height: 34px; border-radius: 50%;
+      border: 3px solid #2a2d50; border-top-color: #a0c8ff;
+      animation: hira-spin 0.8s linear infinite;
+    }
+    @keyframes hira-spin { to { transform: rotate(360deg); } }
+    #hiraBody .hira-retry { margin-top: 4px; }
+
+    /* ── HIRA modal ── */
+    #hiraModal {
+      display: none;
+      position: fixed; inset: 0; z-index: 3000;
+      background: rgba(4,5,15,0.72);
+      align-items: center; justify-content: center;
+      padding: 24px;
+    }
+    #hiraModal.show { display: flex; }
+    #hiraCard {
+      background: #12132a; border: 1px solid #2a2d50; border-radius: 10px;
+      width: min(760px, 96vw); max-height: 90vh;
+      display: flex; flex-direction: column;
+      box-shadow: 0 12px 48px rgba(0,0,0,0.6);
+    }
+    #hiraHead {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 18px; border-bottom: 1px solid #2a2d50; flex-shrink: 0;
+    }
+    #hiraTitle {
+      font-size: 0.9rem; font-weight: 700; letter-spacing: 0.08em; color: #a0c8ff;
+      display: flex; align-items: center; gap: 10px;
+    }
+    #hiraRisk {
+      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em;
+      padding: 3px 9px; border-radius: 4px;
+    }
+    #hiraActions { display: flex; gap: 8px; }
+    .hira-act {
+      background: #1a1c3a; border: 1px solid #2a2d50; border-radius: 5px;
+      padding: 5px 12px; font-size: 0.75rem; font-weight: 600; color: #90b0e0;
+      cursor: pointer; touch-action: manipulation;
+    }
+    .hira-act:hover { background: #22254a; border-color: #4a5080; }
+    .hira-x { color: #99a; font-weight: 700; }
+    #hiraBody {
+      flex: 1; overflow-y: auto; overscroll-behavior: contain;
+      padding: 18px 20px;
+      font-size: 0.95rem; line-height: 1.55; color: #d0d6e8;
+      white-space: pre-wrap; word-wrap: break-word;
+    }
+    #hiraFoot {
+      flex-shrink: 0; padding: 8px 20px 14px;
+      font-size: 0.72rem; color: #556; font-style: italic;
+    }
+    @media print {
+      body > *:not(#hiraModal) { display: none !important; }
+      #hiraModal { position: static; display: block !important; background: #fff; padding: 0; }
+      #hiraCard { box-shadow: none; border: none; max-height: none; width: 100%; background: #fff; }
+      #hiraActions { display: none; }
+      #hiraTitle, #hiraBody, #hiraFoot { color: #000; }
+      #hiraBody { white-space: pre-wrap; }
+    }
+
     /* ── Flight-wide NOTAM filtered-out expand ── */
     .filtered-expand {
       font-size: 0.85rem; color: #445; cursor: pointer; touch-action: manipulation;
@@ -491,6 +577,22 @@
   <div id="header-actions">
     <button id="docBtn" style="display:none" onclick="toggleSrcPane()">DOC</button>
     <button id="flightBtn" onclick="openFlightPanel()">FLIGHT <span id="flightBadge"></span></button>
+    <button id="hiraBtn" onclick="openHira()">HIRA <span id="hiraDot"></span></button>
+  </div>
+</div>
+
+<div id="hiraModal" onclick="if(event.target===this)closeHira()">
+  <div id="hiraCard">
+    <div id="hiraHead">
+      <div id="hiraTitle">FLIGHT HIRA BRIEF <span id="hiraRisk"></span></div>
+      <div id="hiraActions">
+        <button class="hira-act" onclick="copyHira()" id="hiraCopyBtn">Copy</button>
+        <button class="hira-act" onclick="window.print()">Print</button>
+        <button class="hira-act hira-x" onclick="closeHira()">✕</button>
+      </div>
+    </div>
+    <div id="hiraBody"></div>
+    <div id="hiraFoot"></div>
   </div>
 </div>
 
@@ -1573,6 +1675,81 @@ fetch(DATA("general_notams.json"))
     _updateFlightBadge(sections);
   })
   .catch(() => {});
+
+// ── HIRA brief (whole-flight hazard summary) ──────────────────────────────
+// HIRA brief is generated ON DEMAND (POST /api/hira) the first time the button is
+// tapped, then cached server-side to hira.json. On page load we probe that cache: a
+// hit restores the risk dot and holds the brief ready; a miss leaves the button
+// dotless and the first tap generates.
+let _hira = null;
+let _hiraLoading = false;
+const RISK_LABEL_BG = {
+  RED:    { bg: '#4a1010', fg: '#ff8080' },
+  ORANGE: { bg: '#3a1e00', fg: '#ff8c1a' },
+  YELLOW: { bg: '#3a2a00', fg: '#ffd23f' },
+  GREEN:  { bg: '#0e3a20', fg: '#4cff91' },
+};
+function _applyHiraRisk(risk) {
+  const dot = document.getElementById('hiraDot');
+  const color = WX_COLORS[risk] || WX_COLORS.YELLOW;
+  dot.style.background = color;
+  dot.style.color      = color;   // drives the glow
+  dot.classList.add('on');
+}
+fetch(DATA("hira.json"))                 // cache probe — 404 until first generation
+  .then(r => r.ok ? r.json() : null)
+  .then(hira => { if (hira) { _hira = hira; _applyHiraRisk(hira.risk); } })
+  .catch(() => {});
+
+function _renderHiraBrief() {
+  const body = document.getElementById('hiraBody');
+  body.classList.remove('is-status');
+  body.textContent = _hira.brief || '';
+  const risk = document.getElementById('hiraRisk');
+  const c = RISK_LABEL_BG[_hira.risk] || RISK_LABEL_BG.YELLOW;
+  risk.textContent = _hira.risk || '';
+  risk.style.background = c.bg;
+  risk.style.color = c.fg;
+  document.getElementById('hiraFoot').textContent =
+    'AI-synthesised from the deterministic hazard digest. Cross-check against the full dispatch package.';
+}
+function _hiraStatus(html) {
+  document.getElementById('hiraFoot').textContent = '';
+  const body = document.getElementById('hiraBody');
+  body.classList.add('is-status');
+  body.innerHTML = html;
+}
+function _generateHira() {
+  if (_hiraLoading) return;
+  _hiraLoading = true;
+  _hiraStatus('<div class="hira-spinner"></div><div>Generating HIRA brief…<br><span style="font-size:0.8rem;color:#667">this can take up to ~30 seconds</span></div>');
+  fetch('/api/hira', { method: 'POST' })
+    .then(r => r.ok ? r.json() : Promise.reject(r))
+    .then(hira => { _hira = hira; _applyHiraRisk(hira.risk); _renderHiraBrief(); })
+    .catch(() => {
+      _hiraStatus('<div>Couldn’t generate the HIRA brief.</div><button class="hira-act hira-retry" onclick="_generateHira()">Retry</button>');
+    })
+    .finally(() => { _hiraLoading = false; });
+}
+function openHira() {
+  document.getElementById('hiraModal').classList.add('show');
+  if (_hira && _hira.generated) _renderHiraBrief();
+  else _generateHira();
+}
+function closeHira() {
+  document.getElementById('hiraModal').classList.remove('show');
+}
+function copyHira() {
+  if (!_hira) return;
+  navigator.clipboard.writeText(_hira.brief || '').then(() => {
+    const b = document.getElementById('hiraCopyBtn');
+    const t = b.textContent; b.textContent = 'Copied';
+    setTimeout(() => { b.textContent = t; }, 1400);
+  }).catch(() => {});
+}
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeHira();
+});
 
 // ── FIR markers ───────────────────────────────────────────────────────────
 fetch(DATA("fir_notams.json"))
