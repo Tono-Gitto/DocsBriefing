@@ -209,6 +209,22 @@ class TestNoGroups:
         assert becmg is None and overlays == []
 
 
+class TestWindowFormat:
+    """Group windows render as DD/HHMMZ. The day is explicit so a window can't
+    be misread as the HHMM 'CONDITIONS AT' time sitting next to it in the panel,
+    and the minutes are explicit so an FM group's minutes aren't dropped."""
+
+    def test_becmg_window_carries_the_day(self):
+        taf = BASE_TAF + " BECMG 2014/2016 25015KT"
+        _, becmg, _, _ = condense_taf(taf, _dt(2026, 6, 20, 15, 0))
+        assert becmg["window"] == "20/1400Z-20/1600Z"
+
+    def test_fm_window_keeps_minutes(self):
+        taf = BASE_TAF + " FM201830 25015KT 3000 BR"
+        _, _, overlays, _ = condense_taf(taf, _dt(2026, 6, 20, 18, 0))
+        assert overlays[0]["window"] == "from 20/1830Z"
+
+
 class TestWxTierFixtureAnchors:
     """Regression anchors against the validated TG921 fixture rows (CLAUDE.md §2)."""
 
@@ -221,15 +237,22 @@ class TestWxTierFixtureAnchors:
         assert _classify_wx_tier("26005KT 4000 FU SCT100", None, []) == "YELLOW"
 
     def test_opkc_yellow_becmg_in_progress(self):
-        # Base alone is GREEN-boundary (vis 5000, ceiling 2000) but the
-        # in-progress BECMG forces a YELLOW floor regardless of end-state.
+        # Base alone is GREEN-boundary (vis 5000, ceiling 2000); the YELLOW
+        # comes from the BECMG target's own vis 4000, not from the fact that
+        # a transition is under way.
         base = "24012G22KT 5000 HZ BKN020"
-        becmg = {"text": "25006G16KT 4000 HZ BKN020", "window": "2018Z-2020Z"}
+        becmg = {"text": "25006G16KT 4000 HZ BKN020", "window": "20/1800Z-20/2000Z"}
         assert _classify_wx_tier(base, becmg, []) == "YELLOW"
 
     def test_ltcc_yellow_second_becmg_in_progress(self):
-        base = "22006KT CAVOK"
-        becmg = {"text": "30006KT CAVOK", "window": "2011Z-2014Z"}
+        # Real TG921 LTCC @ 1608Z. Stays YELLOW after the in-progress floor
+        # was removed, but for an independent reason: the baseline states
+        # neither a vis token nor CAVOK/NSC, which _tier_for_text treats as
+        # ambiguous-and-therefore-YELLOW for a full-state string. The BECMG
+        # target is GREEN (CAVOK) and contributes nothing.
+        base = "20015KT FEW040"
+        becmg = {"text": "VRB02KT CAVOK", "window": "20/1600Z-20/1800Z"}
+        assert _tier_for_text(becmg["text"]) == "GREEN"
         assert _classify_wx_tier(base, becmg, []) == "YELLOW"
 
     def test_vtbs_green_no_overlays(self):
@@ -298,12 +321,15 @@ class TestWxTierSynthetic:
         becmg = {"text": "24020G35KT 800 TSRA BKN003", "window": "2014Z-2018Z"}
         assert _classify_wx_tier(base, becmg, []) == "RED"
 
-    def test_becmg_in_progress_floor_stays_yellow(self):
-        # Mid-transition never reads as clean GREEN even when both end
-        # states are GREEN-level.
-        base = "24010KT CAVOK"
-        becmg = {"text": "25008KT CAVOK", "window": "2014Z-2018Z"}
-        assert _classify_wx_tier(base, becmg, []) == "YELLOW"
+    def test_becmg_in_progress_has_no_floor_of_its_own(self):
+        # RKSI/TG677 @ 1007Z, the regression this rule was changed for: a
+        # wind-only BECMG between two CAVOK states. Both end-states GREEN on
+        # vis/ceiling => GREEN. An in-progress BECMG contributes only its
+        # target's severity, never a floor.
+        base = "20010KT CAVOK TN24/1020Z TX33/1106Z"
+        becmg = {"text": "14010KT CAVOK TN24/1020Z TX33/1106Z",
+                 "window": "10/1000Z-10/1200Z"}
+        assert _classify_wx_tier(base, becmg, []) == "GREEN"
 
     def test_low_visibility_is_red(self):
         # LVO-class visibility.

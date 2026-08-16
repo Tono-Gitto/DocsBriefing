@@ -252,7 +252,16 @@ def _parse_groups(taf_raw, ref_dt):
 
 
 def _fmt_dt(dt):
-    return f"{dt.day:02d}{dt.hour:02d}Z"
+    """Format a group boundary as DD/HHMMZ.
+
+    The slash is load-bearing. TAF windows are natively day-of-month + hour,
+    so a bare "1010Z" means day 10 / 1000Z — but the panel renders it directly
+    under "CONDITIONS AT 1007Z", which is HHMM. Two identical-looking 4-digit
+    forms meaning different things read as a window starting three minutes
+    from now. DD/HHMMZ also keeps an FM group's minutes (FM301830), which the
+    old DDHH form silently dropped.
+    """
+    return f"{dt.day:02d}/{dt.hour:02d}{dt.minute:02d}Z"
 
 
 def _fmt_window(start, end):
@@ -432,9 +441,15 @@ def _classify_wx_tier(taf_base, becmg_in_progress, active_overlays):
     taf_base holds at ref_dt (already folded by condense_taf) and is scored
     at full severity (RED-capable). becmg_in_progress is also a folded
     full-state string — the airport is mid-transition, which is at least as
-    certain as a TEMPO, so it's scored at full severity too, but still
-    forces a YELLOW floor regardless of either end-state (mid-transition
-    never reads as clean GREEN). active_overlays are raw TEMPO/PROB/FM/
+    certain as a TEMPO, so it's scored at full severity too, and at nothing
+    more: the tier is worst(baseline, target) with no floor of its own. An
+    earlier version floored every in-progress BECMG to YELLOW on the theory
+    that mid-transition never reads as clean GREEN, but that rated a wind-only
+    CAVOK→CAVOK transition (RKSI/TG677 1007Z: 20010KT→14010KT, CAVOK on both
+    sides) as caution-worthy, contradicting this module's own principle that
+    vis/ceiling numbers are what a pilot acts on. A deteriorating BECMG still
+    surfaces — via its target's own numbers, which is where the severity
+    actually lives. active_overlays are raw TEMPO/PROB/FM/
     upcoming-BECMG diff-groups scored with _tier_for_partial_text: TEMPO,
     FM, and an upcoming BECMG are deterministic forecast changes (not yet
     started, but not probabilistic either) and score at full severity.
@@ -451,7 +466,6 @@ def _classify_wx_tier(taf_base, becmg_in_progress, active_overlays):
     tier = _tier_for_text(taf_base) if taf_base else "YELLOW"
 
     if becmg_in_progress:
-        tier = _worse_tier(tier, "YELLOW")
         tier = _worse_tier(tier, _tier_for_text(becmg_in_progress["text"]))
 
     for ov in active_overlays:
