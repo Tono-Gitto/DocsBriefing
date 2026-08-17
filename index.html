@@ -671,10 +671,31 @@ let _srcPane = {
 
 const map = L.map("map", { center: [30, 60], zoom: 3 });
 
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-  maxZoom: 18,
-}).addTo(map);
+// Tiles come from our own origin (see tile_store.py): same-origin means the
+// service worker treats them as ordinary manifest entries, and OSM gets one
+// fetch per tile ever instead of one per device per flight. A run without a
+// cached basemap (legacy data, or a failed tile step) falls back to OSM direct.
+const _tileLayer = L.tileLayer(
+  RUN ? "/tiles/{z}/{x}/{y}.png" : "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+  {
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    maxZoom: 18,
+    // Raised once basemap.json loads. Until then assume the deepest plausible
+    // ceiling so early tile requests aren't needlessly upscaled.
+    maxNativeZoom: 12,
+  }
+).addTo(map);
+
+// The pipeline caches z0 down to whatever depth fits its tile budget, so the
+// ceiling varies by route: a long-haul reaches z6, a turnaround z9. Telling
+// Leaflet where it stops makes it upscale the parent tile past that point
+// rather than requesting tiles that were never fetched — blurry, never blank.
+if (RUN) {
+  fetch(DATA("basemap.json"))
+    .then(r => r.ok ? r.json() : null)
+    .then(b => { if (b && b.max_native_zoom) _tileLayer.options.maxNativeZoom = b.max_native_zoom; })
+    .catch(() => {});
+}
 
 // ── Panel ──────────────────────────────────────────────────────────────────
 function _navList() {

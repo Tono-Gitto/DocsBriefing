@@ -8,6 +8,10 @@ uploads/
 # Large downloaded CSV (auto-downloads on first run)
 data/airports_raw.csv
 
+# Basemap tile store — fetched from OSM at pipeline time, shared across runs.
+# Deliberately outside runs/ so the 24 h sweep leaves it alone (tile_store.py).
+data/tiles/
+
 # Generated JSON outputs (re-created by the pipeline)
 data/airports.json
 data/fir_notams.json

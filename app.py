@@ -588,6 +588,45 @@ def _run_source_pane_step(notam_path, met_path, group_dirs):
         _progress(f"⚠ MET source-document rendering failed — MET pane unavailable ({type(exc).__name__})")
 
 
+# ── Basemap tiles ─────────────────────────────────────────────────────────────
+
+def _run_tile_step(group_dirs):
+    """Fetch the route corridor's basemap tiles. Returns manifest entries.
+
+    Once per run, not per group: a 3–4 leg upload's two map tabs share one
+    tile set, and the bbox unions every leg across both groups or group 2's
+    map opens over blank tiles.
+    """
+    import tile_store
+
+    route_files = [
+        os.path.join(d, n)
+        for d in group_dirs for n in sorted(os.listdir(d))
+        if n.startswith("route_") and n.endswith(".json")
+    ]
+    bbox = tile_store.bbox_for_routes(route_files)
+    if bbox is None:
+        _progress("⚠ no route waypoints — skipping basemap tiles")
+        return []
+
+    tiles   = tile_store.tiles_for_bbox(bbox)
+    ceiling = tile_store.zoom_ceiling(tiles)
+    _progress(f"Fetching basemap: {len(tiles)} tiles, z0–z{ceiling}…")
+    fetched, skipped, failed = tile_store.fetch_tiles(tiles, progress=_progress)
+    _progress(f"Basemap ready — {fetched} fetched, {skipped} already cached, {failed} failed.")
+
+    # Leaflet reads this to set maxNativeZoom, so it upscales past the cached
+    # ceiling instead of requesting tiles that were never fetched.
+    for group_dir in group_dirs:
+        with open(os.path.join(group_dir, "basemap.json"), "w") as f:
+            json.dump({"max_native_zoom": ceiling, "tile_count": len(tiles)}, f, indent=2)
+
+    # Only list tiles that actually made it to disk — a manifest entry the
+    # precache can't fetch would stall the readiness chip forever.
+    return [e for e, t in zip(tile_store.manifest_entries(tiles), tiles)
+            if os.path.exists(tile_store.tile_path(*t))]
+
+
 # ── Run manifest ──────────────────────────────────────────────────────────────
 
 # Written after everything else the pipeline produces. Two jobs in one file:
@@ -754,9 +793,19 @@ def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
         # NOTE: the HIRA brief is generated on demand (POST /api/hira), not here —
         # keeps uploads fast and spends AI tokens only when the crew opens the brief.
 
+        # Run-level, like the source-pane step: one tile set covers every group,
+        # and it needs route_<n>.json so it cannot run before step 2. Its own
+        # try/except — a basemap is a nicety; a tile failure must never fail the
+        # briefing, it just degrades the map.
+        tile_entries = []
+        try:
+            tile_entries = _run_tile_step(group_dirs)
+        except Exception as exc:
+            _progress(f"⚠ basemap tile fetch failed — map will need a connection ({type(exc).__name__})")
+
         # Manifest LAST — it is the completion marker the data routes gate on.
         # Nothing the pipeline writes may land after this line.
-        _write_manifest(run_id, group_dirs)
+        _write_manifest(run_id, group_dirs, tile_entries)
         _progress("Manifest written — run is complete.")
 
         with _lock:
@@ -830,7 +879,9 @@ def upload_files():
 
     upload_dir = os.path.join(UPLOAD_DIR, run_id)
     try:
-        # Sweep run dirs older than 24 h
+        # Sweep run dirs older than 24 h. Deliberately walks RUNS_DIR only —
+        # the basemap tile store lives in data/tiles/ precisely so it survives
+        # this and stays shared across flights (tile_store.py).
         cutoff = time.time() - 86400
         for name in os.listdir(RUNS_DIR):
             path = os.path.join(RUNS_DIR, name)
@@ -952,6 +1003,21 @@ def generate_hira():
     if payload is None:
         return jsonify({"error": "AI synthesis unavailable — retry"}), 503
     return jsonify(payload), 200
+
+
+@app.route("/tiles/<int:z>/<int:x>/<int:y>.png")
+def serve_tile(z, x, y):
+    """Basemap tiles from our own origin — see tile_store.py for why.
+
+    Shared across every run, so this is deliberately NOT run-scoped and is
+    exempt from the runs/ sweep.
+    """
+    import tile_store
+    path = tile_store.tile_path(z, x, y)
+    if not os.path.exists(path):
+        return Response("Not found", status=404)
+    return send_from_directory(os.path.dirname(path), os.path.basename(path),
+                               max_age=31536000)
 
 
 @app.route("/data/<filename>")

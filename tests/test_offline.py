@@ -11,7 +11,106 @@ import os
 import pytest
 
 import app as app_module
+import tile_store
 from app import _build_manifest, _run_dir_if_complete
+
+
+# Real route bboxes, matching the table in docs/adr/0003. These ceilings are the
+# whole point of a budget over a fixed zoom: the bbox needing the most depth
+# (a turnaround, where the crew actually zooms in) costs the least to provide.
+BBOXES = {
+    "EDDF-VTBS": ((13.5, 47.7, 8.3, 100.7),   6),
+    "VTBS-EBBR": ((13.6, 51.0, 4.4, 100.8),   6),
+    "VTBS-VHHH": ((13.6, 22.4, 100.5, 114.0), 8),
+    "VTBS-WMKK": ((2.7, 13.7, 100.5, 101.8),  9),
+}
+
+
+class TestTileBudget:
+    @pytest.mark.parametrize("name", sorted(BBOXES))
+    def test_ceiling_matches_adr(self, name):
+        bbox, expected = BBOXES[name]
+        tiles = tile_store.tiles_for_bbox(bbox)
+        assert tile_store.zoom_ceiling(tiles) == expected
+
+    @pytest.mark.parametrize("name", sorted(BBOXES))
+    def test_stays_within_budget(self, name):
+        bbox, _ = BBOXES[name]
+        assert len(tile_store.tiles_for_bbox(bbox)) <= tile_store.TILE_BUDGET
+
+    @pytest.mark.parametrize("name", sorted(BBOXES))
+    def test_one_more_zoom_would_bust_it(self, name):
+        """The ceiling is the DEEPEST affordable zoom, not just an affordable one."""
+        bbox, ceiling = BBOXES[name]
+        tiles = tile_store.tiles_for_bbox(bbox)
+        nxt = tile_store._tiles_at_zoom(bbox, ceiling + 1)
+        assert len(tiles) + len(nxt) > tile_store.TILE_BUDGET
+
+    def test_covers_every_zoom_from_zero(self, name="EDDF-VTBS"):
+        bbox, ceiling = BBOXES[name]
+        zooms = {z for z, _, _ in tile_store.tiles_for_bbox(bbox)}
+        assert zooms == set(range(0, ceiling + 1))
+
+    def test_no_bbox_fetches_nothing(self):
+        """Never silently fall back to downloading the whole world."""
+        assert tile_store.tiles_for_bbox(None) == []
+
+    def test_tiles_are_unique(self):
+        bbox, _ = BBOXES["VTBS-VHHH"]
+        tiles = tile_store.tiles_for_bbox(bbox)
+        assert len(tiles) == len(set(tiles))
+
+    def test_indices_within_world_bounds(self):
+        """Antimeridian/pole clamping — an out-of-range index 404s forever."""
+        for bbox, _ in BBOXES.values():
+            for z, x, y in tile_store.tiles_for_bbox(bbox):
+                assert 0 <= x < (1 << z) and 0 <= y < (1 << z)
+
+
+class TestBboxForRoutes:
+    def _route(self, tmp_path, name, pts):
+        p = tmp_path / name
+        p.write_text(json.dumps([{"name": "X", "lat": la, "lon": lo} for la, lo in pts]))
+        return str(p)
+
+    def test_unions_every_leg(self, tmp_path):
+        """A 3-4 leg upload's two groups share one tile set; a group-1-only
+        bbox would leave group 2's map over blank tiles."""
+        a = self._route(tmp_path, "route_1.json", [(13.6, 100.7), (22.4, 114.0)])
+        b = self._route(tmp_path, "route_2.json", [(35.5, 139.8), (40.0, 141.0)])
+        assert tile_store.bbox_for_routes([a, b]) == (13.6, 40.0, 100.7, 141.0)
+
+    def test_missing_file_is_skipped(self, tmp_path):
+        a = self._route(tmp_path, "route_1.json", [(13.6, 100.7), (22.4, 114.0)])
+        assert tile_store.bbox_for_routes([a, str(tmp_path / "nope.json")]) is not None
+
+    def test_all_routes_unreadable_returns_none(self, tmp_path):
+        assert tile_store.bbox_for_routes([str(tmp_path / "nope.json")]) is None
+
+    def test_malformed_waypoints_do_not_raise(self, tmp_path):
+        p = tmp_path / "route_1.json"
+        p.write_text('[{"name": "X"}]')       # no lat/lon
+        assert tile_store.bbox_for_routes([str(p)]) is None
+
+
+class TestTileFetch:
+    def test_existing_tiles_are_never_refetched(self, tmp_path):
+        """The whole point of a shared store: a second Bangkok flight is free."""
+        tiles = [(6, 50, 28), (6, 50, 29)]
+        for z, x, y in tiles:
+            p = tile_store.tile_path(z, x, y, str(tmp_path))
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "wb").write(b"\x89PNG")
+        fetched, skipped, failed = tile_store.fetch_tiles(tiles, root=str(tmp_path))
+        assert (fetched, skipped, failed) == (0, 2, 0)
+
+    def test_manifest_entries_are_origin_paths(self):
+        assert tile_store.manifest_entries([(6, 50, 28)]) == ["tiles/6/50/28.png"]
+
+    def test_tile_store_lives_outside_runs(self):
+        """The 24 h sweep walks runs/ — a store inside it would be deleted and
+        the cross-flight sharing would buy nothing."""
+        assert "runs" not in os.path.relpath(tile_store.TILE_DIR, tile_store.HERE).split(os.sep)
 
 
 PIPELINE_FILES = [
