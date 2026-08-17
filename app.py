@@ -1005,6 +1005,18 @@ def generate_hira():
     return jsonify(payload), 200
 
 
+@app.route("/sw.js")
+def service_worker():
+    """Served from the root, not /static/ — a service worker can only control
+    pages at or below its own path, and this one must cover /map and /data/."""
+    resp = send_from_directory(os.path.join(HERE, "static"), "sw.js",
+                               mimetype="application/javascript")
+    # Never let a stale worker pin itself: the browser re-checks this file to
+    # discover updates, which is what drives the "New version" reload chip.
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 @app.route("/tiles/<int:z>/<int:x>/<int:y>.png")
 def serve_tile(z, x, y):
     """Basemap tiles from our own origin — see tile_store.py for why.

@@ -5,6 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Preflight Briefing</title>
 
+  <!-- Installed to the Home Screen from Safari, the briefing opens standalone
+       and works with no connection. Chrome on iOS cannot register a service
+       worker at all (WebKit restriction) — there, the offline path is the
+       downloadable bundle instead. See docs/adr/0003. -->
+  <link rel="manifest" href="/static/app.webmanifest" />
+  <meta name="theme-color" content="#1a1a2e" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Preflight" />
+  <link rel="apple-touch-icon" href="/static/icon-180.png" />
+
   <link rel="stylesheet" href="/static/leaflet.css" />
   <script src="/static/leaflet.js"></script>
 
@@ -328,6 +339,22 @@
       margin-left: auto;
       display: flex; align-items: center; gap: 6px;
     }
+
+    /* ── Offline status chips ──
+       Deliberately quiet when everything is fine and loud when it is not:
+       "ready" is a thin green outline, an ageing briefing and an unsupported
+       browser both go amber, and a failure goes red. */
+    #header .hdr-chip {
+      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em;
+      padding: 4px 9px; border-radius: 999px; white-space: nowrap;
+      border: 1px solid #2a2d50; background: #14162e; color: #8891b0;
+    }
+    .hdr-chip-btn { cursor: pointer; touch-action: manipulation; font-family: inherit; }
+    .hdr-chip-btn:active { background: #22254a; }
+    .hdr-chip.chip-ready { border-color: #2f7d52; color: #4cff91; }
+    .hdr-chip.chip-work  { border-color: #3a4070; color: #a0c8ff; }
+    .hdr-chip.chip-warn  { border-color: #7d6a2f; color: #ffd23f; }
+    .hdr-chip.chip-err   { border-color: #7d3030; color: #ff8080; }
     .ap-btn {
       background: #1a1c3a; border: 1px solid #2a2d50;
       border-radius: 6px; padding: 6px 10px;
@@ -571,6 +598,13 @@
   <h1 id="hdr-title">Preflight Briefing</h1>
   <span id="hdr-sub"></span>
   <div id="header-actions">
+    <!-- Answers "am I safe to go offline?" at a glance, before pushback. It is
+         not decoration: the precache is automatic, so this chip is the only
+         signal that it finished. -->
+    <span id="offlineChip" class="hdr-chip" style="display:none"></span>
+    <span id="ageChip" class="hdr-chip" style="display:none"></span>
+    <button id="updateBtn" class="hdr-chip hdr-chip-btn" style="display:none"
+            onclick="_applyUpdate()">↻ New version</button>
     <button id="docBtn" style="display:none" onclick="toggleSrcPane()">DOC</button>
     <button id="flightBtn" onclick="openFlightPanel()">FLIGHT <span id="flightBadge"></span></button>
     <button id="hiraBtn" onclick="openHira()">HIRA <span id="hiraDot"></span></button>
@@ -680,9 +714,10 @@ const _tileLayer = L.tileLayer(
   {
     attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
     maxZoom: 18,
-    // Raised once basemap.json loads. Until then assume the deepest plausible
-    // ceiling so early tile requests aren't needlessly upscaled.
-    maxNativeZoom: 12,
+    // Start at the shallowest real ceiling and raise it once basemap.json
+    // loads: guessing high would request tiles that were never fetched, and
+    // every one of those is a 404 the service worker cannot answer offline.
+    maxNativeZoom: 6,
   }
 ).addTo(map);
 
@@ -693,7 +728,11 @@ const _tileLayer = L.tileLayer(
 if (RUN) {
   fetch(DATA("basemap.json"))
     .then(r => r.ok ? r.json() : null)
-    .then(b => { if (b && b.max_native_zoom) _tileLayer.options.maxNativeZoom = b.max_native_zoom; })
+    .then(b => {
+      if (!b || !b.max_native_zoom) return;
+      _tileLayer.options.maxNativeZoom = b.max_native_zoom;
+      _tileLayer.redraw();   // options alone don't re-request already-placed tiles
+    })
     .catch(() => {});
 }
 
@@ -1800,6 +1839,116 @@ fetch(DATA("fir_notams.json"))
     });
   })
   .catch(e => console.error("FIR load failed:", e));
+
+// ── Offline support (ADR 0003) ─────────────────────────────────────────────
+// The service worker owns the precache sweep; this file only asks it to start
+// and renders what it reports. See static/sw.js for why that split exists.
+
+let _swReg = null;
+
+function _chip(id, text, cls) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'hdr-chip' + (cls ? ' ' + cls : '');
+  el.style.display = text ? '' : 'none';
+}
+
+function _renderPrecache(s) {
+  if (!s || s.runId !== RUN) return;
+  if (s.state === 'ready')        _chip('offlineChip', '✓ Offline ready', 'chip-ready');
+  else if (s.state === 'partial') _chip('offlineChip', `⚠ ${s.missing} file(s) not cached`, 'chip-warn');
+  else if (s.state === 'error')   _chip('offlineChip', '⚠ Offline caching failed', 'chip-err');
+  else if (s.total)               _chip('offlineChip', `● Caching ${s.done}/${s.total}`, 'chip-work');
+  else                            _chip('offlineChip', '● Caching…', 'chip-work');
+}
+
+// The briefing never expires — it always renders. But stale weather that looks
+// current is the failure mode to design against, so its age is stated plainly
+// and goes amber past 12 h. See ADR 0003 §6.
+const AGE_WARN_H = 12;
+function _renderAge(generatedIso) {
+  if (!generatedIso) return;
+  const gen = new Date(generatedIso);
+  if (isNaN(gen)) return;
+  const render = () => {
+    const hours = (Date.now() - gen.getTime()) / 3600000;
+    const stamp = gen.toISOString().slice(8, 10) + ' ' +
+                  gen.toISOString().slice(11, 16).replace(':', '') + 'Z';
+    if (hours >= AGE_WARN_H) {
+      _chip('ageChip', `⚠ ${Math.floor(hours)} h old — verify current wx`, 'chip-warn');
+    } else {
+      _chip('ageChip', `Briefed ${stamp}`, '');
+    }
+  };
+  render();
+  setInterval(render, 60000);
+}
+
+function _applyUpdate() {
+  // Only ever on an explicit tap: auto-reloading could swap the UI mid-brief.
+  if (_swReg && _swReg.waiting) {
+    _swReg.waiting.postMessage({ type: 'skip-waiting' });
+    navigator.serviceWorker.addEventListener('controllerchange', () => location.reload(), { once: true });
+  } else {
+    location.reload();
+  }
+}
+
+function _watchForUpdate(reg) {
+  if (reg.waiting) _chip('updateBtn', '↻ New version', 'chip-work');
+  reg.addEventListener('updatefound', () => {
+    const sw = reg.installing;
+    if (!sw) return;
+    sw.addEventListener('statechange', () => {
+      // controller present = this is a replacement, not the first install
+      if (sw.state === 'installed' && navigator.serviceWorker.controller) {
+        _chip('updateBtn', '↻ New version', 'chip-work');
+      }
+    });
+  });
+}
+
+function _initOffline() {
+  if (!RUN) return;   // legacy/demo data has no run to cache
+
+  // Read the manifest for the age stamp even where no SW can run — the age
+  // warning is about trusting the weather, not about caching.
+  fetch(MANIFEST_URL).then(r => r.ok ? r.json() : null)
+    .then(m => { if (m) _renderAge(m.generated_iso); })
+    .catch(() => {});
+
+  if (!('serviceWorker' in navigator)) {
+    // Chrome/Firefox/Edge on iOS land here: WebKit only exposes service workers
+    // to Safari and Home Screen web apps. Say so rather than sitting amber
+    // forever — the crew would otherwise wait for a chip that never turns green.
+    _chip('offlineChip', '⚠ No offline caching in this browser', 'chip-warn');
+    return;
+  }
+
+  // Ask the browser not to evict us under disk pressure. Harmless when denied.
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+
+  navigator.serviceWorker.addEventListener('message', e => {
+    if (e.data && e.data.type === 'precache-status') _renderPrecache(e.data);
+  });
+
+  navigator.serviceWorker.register('/sw.js', { scope: '/' })
+    .then(reg => {
+      _swReg = reg;
+      _watchForUpdate(reg);
+      _chip('offlineChip', '● Caching…', 'chip-work');
+      // Start the sweep as soon as a worker is actually controlling the page —
+      // on a first load that is only after the initial install activates.
+      const start = () => navigator.serviceWorker.controller &&
+                          navigator.serviceWorker.controller.postMessage({ type: 'precache', runId: RUN });
+      if (navigator.serviceWorker.controller) start();
+      else navigator.serviceWorker.addEventListener('controllerchange', start, { once: true });
+    })
+    .catch(() => _chip('offlineChip', '⚠ Offline caching unavailable', 'chip-warn'));
+}
+
+_initOffline();
 </script>
 </body>
 </html>
