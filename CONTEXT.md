@@ -62,6 +62,10 @@ detail. See `CLAUDE.md` for architecture and `docs/adr/` for decisions.
   ability to use the airport/route now; T2 = notable degradation; T3 = everything else.
 - **Filtered-out NOTAM** — a flight-wide NOTAM the AI judged irrelevant to this flight;
   kept visible in a collapsed audit list so the pilot can verify the exclusion.
+- **Tier Override** — a tier the crew set by hand, replacing the engine's. Client-side and
+  scoped to one run; the engine's own rating survives beside it as **`tier_auto`**, and any
+  row where the two differ says so (`T2*`, plus a muted `auto T1`). An override is a
+  judgement about the *NOTAM*, not about one leg: it applies to every leg's copy.
 
 ## Weather
 

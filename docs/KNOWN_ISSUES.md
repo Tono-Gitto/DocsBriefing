@@ -3,7 +3,7 @@
 Open problems, unproven claims, and accepted limitations. Close an entry by deleting it in
 the same commit that fixes it.
 
-Last reviewed: 2026-08-17, after merging the offline briefing (ADR 0003).
+Last reviewed: 2026-08-17, after adding manual tier overrides (ADR 0004).
 
 | # | Issue | Severity |
 |---|---|---|
@@ -15,6 +15,7 @@ Last reviewed: 2026-08-17, after merging the offline briefing (ADR 0003).
 | 6 | Uncommitted fixture changes in `Input/`, and TG970 undocumented | housekeeping |
 | 7 | HIRA deliberately switched off | tracked, not a bug |
 | 8 | Accepted limitations (service workers on iOS Chrome; single cached briefing) | by design |
+| 9 | Manual tier overrides reach neither HIRA nor the bundle | by design |
 
 ---
 
@@ -189,3 +190,28 @@ Recorded so they are not rediscovered as bugs.
 - **Deep zoom beyond the cached ceiling is upscaled and blurry.** Deliberate — a parent
   tile covers 4× the child's area, so substituting it would render *misplaced* geography
   rather than merely soft. See the correction recorded in ADR 0003 §4.
+
+---
+
+## #9 — Manual tier overrides reach neither HIRA nor the bundle
+
+**Status:** intentional · Tracked so neither divergence is rediagnosed as a bug.
+
+Overrides (ADR 0004) live in the browser's `localStorage`, scoped to the run. Two places
+therefore keep showing the engine's own tiers:
+
+- **The HIRA brief and its risk dot.** `hira_engine.build_digest()` reads tiers server-side
+  from `airports.json`, and `hira.json` is cached on disk and in the service worker. Fixing
+  it would mean a server round-trip plus a fresh 10–30 s Sonnet call that cannot happen
+  offline — so the brief would go silently stale exactly when it matters. The modal states
+  the divergence instead: *"Generated from automatic tiers — N manual tier change(s) not
+  reflected."* Currently dormant anyway, see #7. ADR 0004 §7.
+- **`bundle.html`.** It is a `file://` origin, so its storage is empty or unavailable and the
+  bundle renders automatic tiers only. The loss is asymmetric: a missing *downgrade* shows
+  something more severe (safe), but a missing *promotion* means a NOTAM the crew hand-marked
+  T1 reaches the other pilot as T3. The Download-bundle button confirms when overrides exist.
+  Shipping them into the bundle was rejected — it needs the server round-trip above plus
+  invalidating the disk-cached bundle on every tap. ADR 0004 §8.
+
+Also by design: overrides are **not** carried into the next run (a NOTAM's meaning depends on
+the flight), and two tabs on one run converge on reload rather than live.

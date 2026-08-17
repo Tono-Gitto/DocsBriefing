@@ -263,6 +263,40 @@
     .badge-t2 { background: #3a2a00; color: #ffc060; }
     .badge-t3 { background: #1e1e2e; color: #667; }
 
+    /* Manual tier override (docs/adr/0004). The badge keeps its tier color —
+       the severity semaphore must still read at a glance — and says it was
+       edited with an asterisk plus the engine's own rating alongside. */
+    .tier-badge { cursor: pointer; user-select: none; }
+    .notam-auto {
+      font-size: 0.72rem; color: #556; font-style: italic;
+      letter-spacing: 0.02em;
+    }
+    .tier-resort {
+      display: inline-block; margin: 2px 0 8px;
+      padding: 4px 10px; border-radius: 12px;
+      background: #12203a; border: 1px solid #2a4a7a;
+      color: #8ec8ff; font-size: 0.8rem; cursor: pointer;
+    }
+    #tierToast {
+      position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+      display: none; align-items: center; gap: 12px; z-index: 3000;
+      max-width: min(92vw, 460px);
+      padding: 9px 14px; border-radius: 8px;
+      background: #16182e; border: 1px solid #2a2d55;
+      box-shadow: 0 6px 22px rgba(0,0,0,0.55);
+      color: #b8c8e0; font-size: 0.85rem;
+    }
+    #tierToast.show { display: flex; }
+    #tierToastText { font-family: 'SF Mono', 'Fira Mono', monospace; }
+    #tierToastUndo {
+      background: none; border: none; cursor: pointer;
+      color: #8ec8ff; font-size: 0.85rem; font-weight: 600;
+      letter-spacing: 0.06em; padding: 2px 4px;
+    }
+    .hira-tier-note {
+      margin-bottom: 10px; font-size: 0.8rem; color: #8a7a55; font-style: italic;
+    }
+
     .notam-row {
       padding: 11px 0;
       border-bottom: 1px solid #191c38;
@@ -589,6 +623,14 @@
 </head>
 <body>
 
+<!-- Undo for a manual tier change (docs/adr/0004 §5). A cycling badge re-rates
+     a hazard on one tap with no confirmation; this is what makes a mis-tap
+     recoverable, and the only hint that the badge is interactive at all. -->
+<div id="tierToast">
+  <span id="tierToastText"></span>
+  <button id="tierToastUndo" type="button">UNDO</button>
+</div>
+
 <div id="warnBanner">
   <span class="warn-text" id="warnBannerText"></span>
   <span class="warn-close" onclick="document.getElementById('warnBanner').classList.remove('show')">✕</span>
@@ -698,6 +740,111 @@ const MANIFEST_URL = (RUN && !BUNDLE) ? `/data/${RUN}/manifest.json` : null;
 
 const ROUTE_COLORS = ["#5b9ef4", "#f4a15b"];  // leg 1 = blue, leg 2 = orange
 
+// ── Manual tier overrides (docs/adr/0004) ──────────────────────────────────
+// The crew can re-rate any NOTAM by tapping its tier badge. Overrides live in
+// localStorage, scoped to the run, and are applied ONCE at data-load time by
+// overwriting n.tier (keeping the engine's own rating as n.tier_auto). That
+// single seam is deliberate: tier is read at eight places — badge, panel sort,
+// FIR diamond color, chip glow, FLIGHT counts, T3 collapse, and Selection
+// Sync's "first anchored row in DOM order" target, which is only correct
+// because panels render tier-sorted — and mutating the data keeps all eight
+// coherent with no edit at any of them.
+//
+// Run-scoped and never seeded from the previous run: a NOTAM's operational
+// meaning depends on the flight (a closure irrelevant at 0600Z matters at
+// 1800Z), so carrying a downgrade forward would silently hide a live hazard.
+const TIER_KEY       = RUN ? `preflight.tiers.${RUN}` : null;
+const TIER_KEEP_RUNS = 20;
+
+let _tierStoreOk  = true;   // false once localStorage throws (Safari private mode)
+let _tierOverrides = {};    // key "<owner>|<id>" → 1|2|3, as applied to this page
+const _tierIndex   = new Map();  // key → [notam objects], every leg's copy
+let _tierStale     = 0;     // overrides applied since the open panel was rendered
+
+function _tierRead() {
+  if (!TIER_KEY || !_tierStoreOk) return null;
+  try {
+    const raw = localStorage.getItem(TIER_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { _tierStoreOk = false; return null; }
+}
+
+function _tierWrite(overrides) {
+  if (!TIER_KEY || !_tierStoreOk) return;
+  try {
+    localStorage.setItem(TIER_KEY, JSON.stringify({
+      saved_iso: new Date().toISOString(),
+      overrides,
+    }));
+  } catch (e) { _tierStoreOk = false; }   // degrade to in-memory for the session
+}
+
+// Read-modify-write, always. A 3–4 leg upload opens TWO map tabs on one
+// run_id (different ?g=) and both share this key; general_notams.json carries
+// the same NOTAM ids in both groups. Writing the in-memory map wholesale would
+// let this tab's next tap erase every override made in the other one.
+function _tierPersist(key, tier) {
+  const stored = (_tierRead() || {}).overrides || {};
+  if (tier === null) delete stored[key]; else stored[key] = tier;
+  _tierWrite(stored);
+}
+
+// Bounded without a time policy: a briefing left open across a long layover is
+// never pruned out from under the crew, and 20 flights is far more history
+// than anyone revisits. The current run is always kept.
+function _tierPrune() {
+  if (!_tierStoreOk) return;
+  try {
+    const entries = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith('preflight.tiers.')) continue;
+      let saved = '';
+      try { saved = (JSON.parse(localStorage.getItem(k)) || {}).saved_iso || ''; } catch (e) {}
+      entries.push({ k, saved });
+    }
+    entries.sort((a, b) => (b.saved || '').localeCompare(a.saved || ''));
+    entries.slice(TIER_KEEP_RUNS).forEach(e => {
+      if (e.k !== TIER_KEY) localStorage.removeItem(e.k);
+    });
+  } catch (e) { _tierStoreOk = false; }
+}
+
+_tierPrune();
+_tierOverrides = (_tierRead() || {}).overrides || {};
+
+// The load-time seam. Called for every NOTAM list as its JSON arrives, before
+// anything renders. Also builds _tierIndex so a later tap can update every
+// leg's copy of a NOTAM without re-walking the data.
+function _applyTierOverrides(notams, owner) {
+  (notams || []).forEach(n => {
+    if (n.tier_auto === undefined) n.tier_auto = n.tier;
+    const key = `${owner}|${n.id}`;
+    const ov  = _tierOverrides[key];
+    n.tier = (ov === undefined || ov === null) ? n.tier_auto : ov;
+    if (!_tierIndex.has(key)) _tierIndex.set(key, []);
+    _tierIndex.get(key).push(n);
+  });
+}
+
+// Counted from storage when it is available, not from this page's applied map:
+// a second tab on the same run writes to the same key, and the two places this
+// number is shown — the HIRA note and the bundle-download confirm — are both
+// statements about what the *run* carries, not about what this tab did.
+function _tierCount() {
+  const stored = (_tierRead() || {}).overrides;
+  return Object.keys(stored || _tierOverrides).length;
+}
+
+// Cycle T1 → T2 → T3 → Auto, skipping any state that would look identical to
+// the current one. An explicit tier equal to tier_auto is therefore
+// unreachable, so every tap visibly changes something — necessary for a
+// control with no confirmation step. `cur`/return: 1|2|3, or null for Auto.
+function _tierNextState(cur, auto) {
+  const states = [1, 2, 3].filter(t => t !== auto).concat([null]);
+  return states[(states.indexOf(cur) + 1) % states.length];
+}
+
 let _activeRwyFilter = null;
 let _navAirports = [];
 let _navFirs     = [];
@@ -800,8 +947,16 @@ function navigateTo(idx) {
   focusAirport(data.lat, data.lon);
 }
 
+// _openPanel* is what the re-sort chip re-renders (docs/adr/0004 §6); a fresh
+// render is sorted by definition, so staleness resets here.
+let _openPanelData = null;
+let _openPanelType = null;
+
 function openPanel(data, type = 'airport') {
   clearNotamFilter();
+  _openPanelData = data;
+  _openPanelType = type;
+  _tierStale     = 0;
   const c = document.getElementById("panel-content");
   c.innerHTML = type === "fir" ? buildFirPanel(data) : buildPanel(data);
   document.body.classList.add("panel-open");
@@ -1136,7 +1291,129 @@ function showSourceAnchor(doc, key, rowEl) {
   _drawDocAnchor(doc, key, rowEl);
 }
 
+// ── Tier override interaction (docs/adr/0004 §4–§6) ────────────────────────
+// The tapped badge repaints WHERE IT IS — the row never moves under the
+// finger, or cycling T1 → Auto would mean chasing it across the panel and
+// possibly into a collapsed "show N more T3" block. Indicators that are not
+// under the finger (FIR diamonds, FLIGHT counts, chip glow) update at once;
+// row order is recovered by the re-sort chip or by reopening the panel.
+function _tierApply(key, tier) {
+  const objs = _tierIndex.get(key) || [];
+  if (!objs.length) return;
+
+  // An override equal to the engine's own rating is stored as Auto, not as an
+  // explicit tier. _tierNextState already makes that state unreachable through
+  // the cycle; normalising here keeps the invariant true at the one write
+  // point, so a redundant entry can never inflate _tierCount() and warn about
+  // a "manual change" that changes nothing.
+  if (tier === objs[0].tier_auto) tier = null;
+
+  if (tier === null) delete _tierOverrides[key]; else _tierOverrides[key] = tier;
+  objs.forEach(n => { n.tier = (tier === null ? n.tier_auto : tier); });
+
+  _tierPersist(key, tier);
+  _tierRepaintRow(key, objs[0]);
+  _updateFlightBadge(_generalNotams);
+  _refreshFirMarkers();
+  _refreshChipGlow();
+}
+
+function _cycleTier(el) {
+  const key  = el.dataset.tierKey;
+  const objs = _tierIndex.get(key) || [];
+  if (!objs.length) return;
+
+  const auto = objs[0].tier_auto;
+  const prev = _tierOverrides[key] === undefined ? null : _tierOverrides[key];
+  const next = _tierNextState(prev, auto);
+
+  _tierApply(key, next);
+  _tierStaleBump(+1);
+  _tierToast(key, next, auto, prev);
+}
+
+function _tierRepaintRow(key, n) {
+  document.querySelectorAll(`.tier-badge[data-tier-key="${CSS.escape(key)}"]`).forEach(badge => {
+    const edited = n.tier !== n.tier_auto;
+    badge.className = `badge ${tierBadgeClass(n.tier)} tier-badge`;
+    badge.textContent = `T${n.tier}${edited ? '*' : ''}`;
+    const row  = badge.closest('.notam-row');
+    const auto = row && row.querySelector('.notam-auto');
+    if (auto) auto.textContent = edited ? `auto T${n.tier_auto}` : '';
+  });
+}
+
+// The re-sort chip: shown only while the open panel's order is stale, gone the
+// moment it is tapped. Inserted before the first NOTAM row, which puts it above
+// the NOTAM block in every panel kind (airport, FIR, FLIGHT) with no change to
+// any of the four builders.
+function _tierStaleBump(delta) {
+  _tierStale = Math.max(0, _tierStale + delta);
+  const panel = document.getElementById('panel-content');
+  let chip = document.getElementById('tierResortChip');
+
+  if (!_tierStale) { if (chip) chip.remove(); return; }
+  if (!panel) return;
+
+  if (!chip) {
+    const first = panel.querySelector('.notam-row');
+    if (!first) return;
+    chip = document.createElement('div');
+    chip.id = 'tierResortChip';
+    chip.className = 'tier-resort';
+    chip.addEventListener('click', ev => { ev.stopPropagation(); _resortPanel(); });
+    first.parentNode.insertBefore(chip, first);
+  }
+  chip.textContent = `⇅ Re-sort (${_tierStale} changed)`;
+}
+
+// Re-rendering detaches the node held in _srcPane.docs.notam.selectedRowEl, so
+// the Source Pane's row selection is re-applied by anchor key afterwards.
+function _resortPanel() {
+  const activeKey = _srcPane.docs.notam.activeKey;
+  _tierStale = 0;
+
+  if (_openPanelType === 'flight')  openFlightPanel();
+  else if (_openPanelData)          openPanel(_openPanelData, _openPanelType);
+  else                              return;
+
+  if (activeKey && _srcPane.open) {
+    const row = document.querySelector(
+      `#panel-content .notam-row[data-anchor-key="${CSS.escape(activeKey)}"]`);
+    if (row) _drawDocAnchor('notam', activeKey, row);
+  }
+}
+
+let _tierToastTimer = null;
+function _tierToast(key, tier, auto, prev) {
+  const el = document.getElementById('tierToast');
+  if (!el) return;
+  const label = tier === null ? `Auto (T${auto})` : `T${tier}`;
+  document.getElementById('tierToastText').textContent = `${key.replace('|', ' ')} → ${label}`;
+  document.getElementById('tierToastUndo').onclick = () => {
+    _tierApply(key, prev);
+    _tierStaleBump(-1);
+    _tierToastHide();
+  };
+  el.classList.add('show');
+  clearTimeout(_tierToastTimer);
+  _tierToastTimer = setTimeout(_tierToastHide, 4000);
+}
+
+function _tierToastHide() {
+  clearTimeout(_tierToastTimer);
+  const el = document.getElementById('tierToast');
+  if (el) el.classList.remove('show');
+}
+
 document.addEventListener('click', e => {
+  // FIRST branch, and it stops propagation: an anchored row's tap opens the
+  // Source Pane (ADR 0002), so the badge must claim its own tap before that
+  // handler below sees it. The key travels in a data- attribute — NOTAM ids
+  // come from third-party PDFs and are never interpolated into inline JS.
+  const tierBadge = e.target.closest('.tier-badge[data-tier-key]');
+  if (tierBadge) { e.stopPropagation(); _cycleTier(tierBadge); return; }
+
   const notamRow = e.target.closest('.notam-row[data-anchor-key]');
   if (notamRow) { showSourceAnchor('notam', notamRow.dataset.anchorKey, notamRow); return; }
 
@@ -1269,10 +1546,19 @@ function badgeClass(type) {
 //   (DOM id: notam-u-<safeId>, with optional per-leg chips).
 //   anchorKey (optional) is "<owner>|<notam id>" — if it exists in the loaded
 //   Source Pane anchors, the row becomes clickable and gets a passive blue dot.
+function tierBadgeClass(tier) {
+  return tier === 1 ? "badge-t1" : tier === 2 ? "badge-t2" : "badge-t3";
+}
+
 function notamRow(n, legInfo, anchorKey) {
   const unified  = Array.isArray(legInfo);
-  const tierClass = n.tier === 1 ? "badge-t1" : n.tier === 2 ? "badge-t2" : "badge-t3";
-  const tierLabel = n.tier === 1 ? "T1" : n.tier === 2 ? "T2" : "T3";
+  // A manually overridden tier keeps its tier color — the severity semaphore
+  // must still read at a glance — and marks itself with an asterisk plus the
+  // engine's own rating, so tier_auto is legible without mutating anything to
+  // discover it. See docs/adr/0004 §6.
+  const edited    = n.tier_auto !== undefined && n.tier !== n.tier_auto;
+  const tierClass = tierBadgeClass(n.tier);
+  const tierLabel = `T${n.tier}${edited ? '*' : ''}`;
   const win    = compactWindow(n.window);
   const safeId = n.id.replace(/[^a-zA-Z0-9]/g, '_');
   const domId  = unified ? `notam-u-${safeId}` : `notam-l${legInfo}-${safeId}`;
@@ -1282,10 +1568,15 @@ function notamRow(n, legInfo, anchorKey) {
   const shown  = n.summary || n.body;
   const hasAnchor = !!(anchorKey && _srcPane.docs.notam.anchors && _srcPane.docs.notam.anchors[anchorKey]);
   const anchorAttr = hasAnchor ? ` data-anchor-key="${esc(anchorKey)}"` : '';
+  // data-tier-key is emitted independently of data-anchor-key: anchors are
+  // best-effort and absent wholesale on legacy/demo runs, so hanging the
+  // gesture off them would make rows non-cyclable exactly where they failed.
+  const tierAttr = anchorKey ? ` data-tier-key="${esc(anchorKey)}"` : '';
   let row = `<div class="notam-row" id="${domId}" data-notam-id="${safeId}"${anchorAttr}>
     <div class="notam-header">
-      <span class="badge ${tierClass}">${tierLabel}</span>${chips}
-      <span class="notam-id">${esc(n.id)}</span>`;
+      <span class="badge ${tierClass} tier-badge"${tierAttr}>${tierLabel}</span>${chips}
+      <span class="notam-id">${esc(n.id)}</span>
+      <span class="notam-auto">${edited ? `auto T${n.tier_auto}` : ''}</span>`;
   if (win) row += `<span class="notam-window">${esc(win)}</span>`;
   row += `</div><div class="notam-body">${esc(shown)}</div></div>`;
   return row;
@@ -1367,7 +1658,10 @@ function buildPanel(ap) {
   if (allUncovered) {
     html += `<div class="no-data">Airport not in NOTAM brief</div>`;
   } else if (!multiLeg) {
-    const notams = legs[0].notams || [];
+    // Sorted by tier here, not just trusted from the server: airports.json
+    // arrives tier-sorted, so this is a no-op until a manual override changes
+    // one (docs/adr/0004 §6). Array.sort is stable, so ties keep server order.
+    const notams = (legs[0].notams || []).slice().sort((a, b) => a.tier - b.tier);
     if (notams.length === 0) {
       html += `<div class="no-data">No active NOTAMs at ref time</div>`;
     } else {
@@ -1480,11 +1774,30 @@ function buildFirNotamSection(leg, firCode) {
 
 // ── Flight-wide NOTAM panel ────────────────────────────────────────────────
 function openFlightPanel() {
+  _openPanelData = null;
+  _openPanelType = 'flight';
+  _tierStale     = 0;
   document.getElementById('panel-content').innerHTML = buildFlightPanel(_generalNotams);
   document.body.classList.add('panel-open');
   _navIndex = -1;
   _updateNavBar();
   _syncSourcePane(null, 'flight');
+}
+
+// docs/adr/0004 §9 — a filtered-out NOTAM the crew promoted to T1/T2 renders in
+// the section's visible list. Partitioned at RENDER time from tier/tier_auto,
+// never by moving the object between sec.notams and sec.filtered_out, so
+// cycling it back to Auto returns it to the audit list with no reload.
+// Strictly promotion — `tier < tier_auto`, i.e. the crew made it MORE severe.
+// "Any override that lands on T1/T2" would also pull out a filtered-out T1 the
+// crew just downgraded to T2, which is the opposite of what that tap meant.
+function _flightSectionParts(sec) {
+  const filteredAll = sec.filtered_out || [];
+  const promoted    = filteredAll.filter(n => n.tier_auto !== undefined && n.tier < n.tier_auto);
+  return {
+    visible:  (sec.notams || []).concat(promoted),
+    filtered: filteredAll.filter(n => promoted.indexOf(n) === -1),
+  };
 }
 
 function buildFlightPanel(sections) {
@@ -1497,15 +1810,20 @@ function buildFlightPanel(sections) {
     html += `<div class="panel-section">
       <div class="panel-label">${esc(sec.label)}</div>`;
 
-    const notams = sec.notams || [];
-    const filtered = sec.filtered_out || [];
+    const { visible: notams, filtered } = _flightSectionParts(sec);
 
     if (notams.length === 0) {
       html += `<div class="no-data">No relevant NOTAMs</div>`;
     } else {
-      const t1t2 = notams.filter(n => n.tier < 3);
-      const t3   = notams.filter(n => n.tier === 3);
-      t1t2.forEach(n => { html += notamRow(n, 0, `${sec.key}|${n.id}`); });
+      const t1t2  = notams.filter(n => n.tier < 3);
+      const t3all = notams.filter(n => n.tier === 3);
+      // A NOTAM the engine rated T1/T2 that a human downgraded is exempt from
+      // the truncation below — the T3*/auto Tn pair has to stay on screen or
+      // the override is unauditable (docs/adr/0004 §9).
+      const t3down = t3all.filter(n => n.tier_auto !== undefined && n.tier_auto < 3);
+      const t3     = t3all.filter(n => t3down.indexOf(n) === -1);
+      t1t2.forEach(n   => { html += notamRow(n, 0, `${sec.key}|${n.id}`); });
+      t3down.forEach(n => { html += notamRow(n, 0, `${sec.key}|${n.id}`); });
       if (t3.length <= 5) {
         t3.forEach(n => { html += notamRow(n, 0, `${sec.key}|${n.id}`); });
       } else {
@@ -1537,7 +1855,7 @@ function buildFlightPanel(sections) {
 }
 
 function _updateFlightBadge(sections) {
-  const allNotams = sections.flatMap(s => s.notams || []);
+  const allNotams = (sections || []).flatMap(s => _flightSectionParts(s).visible);
   const badge = document.getElementById('flightBadge');
   if (!badge) return;
   const t1count = allNotams.filter(n => n.tier === 1).length;
@@ -1690,6 +2008,12 @@ Promise.all([
   fetch(DATA("flight_info.json")).then(r => r.ok ? r.json() : {}).catch(() => ({})),
   fetch(DATA("airports.json")).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
 ]).then(([fi, airports]) => {
+  // Manual tier overrides are applied once, here, before anything renders
+  // (docs/adr/0004 §2). One override covers every leg's copy of a NOTAM: the
+  // panel dedups by id with first-leg-wins, so a per-leg override could not be
+  // expressed in the UI that creates it.
+  airports.forEach(ap => _legsFor(ap).forEach(l => _applyTierOverrides(l.notams, ap.icao)));
+
   // Support legacy flat format (dep/dest as direct strings)
   const legs = fi.legs || (fi.dep ? [{leg:1, dep:fi.dep, dest:fi.dest,
     flight:fi.flight, date:fi.date, acft:fi.acft, reg:fi.reg}] : []);
@@ -1762,6 +2086,10 @@ fetch(DATA("general_notams.json"))
   .then(r => r.ok ? r.json() : null)
   .then(sections => {
     if (!sections) return;  // absent on legacy / MVP runs — silently ignore
+    sections.forEach(s => {
+      _applyTierOverrides(s.notams, s.key);
+      _applyTierOverrides(s.filtered_out, s.key);
+    });
     _generalNotams = sections;
     _updateFlightBadge(sections);
   })
@@ -1805,6 +2133,16 @@ function _renderHiraBrief() {
   const body = document.getElementById('hiraBody');
   body.classList.remove('is-status');
   body.textContent = _hira.brief || '';
+  // hira_engine reads tiers server-side from airports.json and the brief is
+  // cached, so manual overrides cannot reach it. State the divergence rather
+  // than let the dot silently contradict the badges (docs/adr/0004 §7).
+  const edits = _tierCount();
+  if (edits) {
+    const note = document.createElement('div');
+    note.className = 'hira-tier-note';
+    note.textContent = `Generated from automatic tiers — ${edits} manual tier change${edits > 1 ? 's' : ''} not reflected.`;
+    body.insertBefore(note, body.firstChild);
+  }
   const risk = document.getElementById('hiraRisk');
   const c = RISK_LABEL_BG[_hira.risk] || RISK_LABEL_BG.YELLOW;
   risk.textContent = _hira.risk || '';
@@ -1864,19 +2202,49 @@ fetch(DATA("fir_notams.json"))
     firs.forEach(f => {
       // Support both new `legs` schema and legacy flat schema
       const legs = f.legs || [{leg:1, ref_time:f.ref_time, notams:f.notams||[]}];
+      legs.forEach(l => _applyTierOverrides(l.notams, f.fir));
       const allFirNotams = legs.flatMap(l => l.notams || []);
       if (!allFirNotams.length) return;
 
       _navFirs.push(f);
-      const color = allFirNotams.some(n => n.tier <= 2) ? "#c8a800" : "#1a1a2e";
-      const tip   = `${f.fir} — ${f.name} (${allFirNotams.length})`;
-      L.marker([f.lat, f.lon], { icon: firIcon(color), zIndexOffset: 50 })
+      const tip = `${f.fir} — ${f.name} (${allFirNotams.length})`;
+      const marker = L.marker([f.lat, f.lon], { icon: firIcon(_firColor(allFirNotams)), zIndexOffset: 50 })
         .bindTooltip(tip, { direction: "top", offset: [0, -8] })
         .on("click", () => openPanel(f, "fir"))
         .addTo(map);
+      // Kept so a tier override can recolor the diamond without a reload
+      // (docs/adr/0004 §6 — indicators away from the finger update at once).
+      _firMarkers.push({ notams: allFirNotams, marker });
     });
   })
   .catch(e => console.error("FIR load failed:", e));
+
+const _firMarkers = [];
+function _firColor(notams) {
+  return notams.some(n => n.tier <= 2) ? "#c8a800" : "#1a1a2e";
+}
+function _refreshFirMarkers() {
+  _firMarkers.forEach(({ notams, marker }) => marker.setIcon(firIcon(_firColor(notams))));
+}
+
+// Runway-chip glow is driven by the best tier among the NOTAMs the chip
+// matched; the matched ids never change, only their tiers, so the glow is
+// recomputed in place rather than by rebuilding the chips (which would drop
+// any active runway filter).
+function _refreshChipGlow() {
+  if (_openPanelType !== 'airport' || !_openPanelData) return;
+  const icao = _openPanelData.icao;
+  document.querySelectorAll('#panel-content .rwy-chip[data-rwy]').forEach(chip => {
+    const ids = chip.dataset.ids ? chip.dataset.ids.split('|') : [];
+    let best = null;
+    ids.forEach(id => {
+      (_tierIndex.get(`${icao}|${id}`) || []).forEach(n => {
+        if (n.tier <= 2 && (best === null || n.tier < best)) best = n.tier;
+      });
+    });
+    if (best) chip.dataset.tier = best; else delete chip.dataset.tier;
+  });
+}
 
 // ── Offline support (ADR 0003) ─────────────────────────────────────────────
 // The service worker owns the precache sweep; this file only asks it to start
@@ -1948,6 +2316,16 @@ function _watchForUpdate(reg) {
 }
 
 function _downloadBundle() {
+  // The bundle is file:// — a different origin, so it carries none of this
+  // device's overrides (docs/adr/0004 §8). The loss is asymmetric: a missing
+  // downgrade shows something more severe, but a missing promotion means a
+  // NOTAM hand-marked T1 reaches the other pilot as T3. Say so before sending.
+  const edits = _tierCount();
+  if (edits && !confirm(
+      `The bundle contains automatic tiers only.\n\n` +
+      `${edits} manual tier change${edits > 1 ? 's' : ''} will not be included.\n\nDownload anyway?`)) {
+    return;
+  }
   const btn = document.getElementById('bundleBtn');
   btn.textContent = '⬇ Building…';
   // Server-side build can take ~20 s the first time; cached on disk after.
