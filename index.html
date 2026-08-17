@@ -614,7 +614,7 @@
             onclick="_switchGroup()"></button>
     <button id="docBtn" style="display:none" onclick="toggleSrcPane()">DOC</button>
     <button id="flightBtn" onclick="openFlightPanel()">FLIGHT <span id="flightBadge"></span></button>
-    <button id="hiraBtn" onclick="openHira()">HIRA <span id="hiraDot"></span></button>
+    <button id="hiraBtn" style="display:none" onclick="openHira()">HIRA <span id="hiraDot"></span></button>
   </div>
 </div>
 
@@ -1787,10 +1787,19 @@ function _applyHiraRisk(risk) {
   dot.style.color      = color;   // drives the glow
   dot.classList.add('on');
 }
-fetch(DATA("hira.json"))                 // cache probe — 404 until first generation
-  .then(r => r.ok ? r.json() : null)
-  .then(hira => { if (hira) { _hira = hira; _applyHiraRisk(hira.risk); } })
-  .catch(() => {});
+// HIRA is switched off for now: the button is hidden (see #hiraBtn), the cache
+// probe below is skipped, and openHira() no-ops — so no Sonnet call can be
+// triggered from the UI. The server refuses POST /api/hira independently
+// (HIRA_ENABLED in app.py). Flip both flags back on to restore it; all of the
+// modal, risk-dot and hira_engine code is left intact and untouched.
+const HIRA_ENABLED = false;
+
+if (HIRA_ENABLED) {
+  fetch(DATA("hira.json"))               // cache probe — 404 until first generation
+    .then(r => r.ok ? r.json() : null)
+    .then(hira => { if (hira) { _hira = hira; _applyHiraRisk(hira.risk); } })
+    .catch(() => {});
+}
 
 function _renderHiraBrief() {
   const body = document.getElementById('hiraBody');
@@ -1827,6 +1836,7 @@ function _generateHira() {
     .finally(() => { _hiraLoading = false; });
 }
 function openHira() {
+  if (!HIRA_ENABLED) return;             // switched off — see HIRA_ENABLED above
   document.getElementById('hiraModal').classList.add('show');
   if (_hira && _hira.generated) _renderHiraBrief();
   else _generateHira();

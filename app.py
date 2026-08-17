@@ -48,6 +48,12 @@ RUNS_DIR   = os.path.join(HERE, "runs")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(RUNS_DIR,   exist_ok=True)
 
+# HIRA is switched off for now. The map hides its button and no-ops openHira()
+# (HIRA_ENABLED in index.html); this refuses the endpoint independently, so no
+# Sonnet call can be reached even by a direct POST. hira_engine.py and the
+# modal are left intact — flip both flags back on to restore the feature.
+HIRA_ENABLED = False
+
 _DEFAULT_TAXI_MIN    = 20    # fallback when OFP TAXI line is absent; shifts all ref_times if wrong
 _FIR_FLIGHT_WINDOW_H = 24   # FIR NOTAMs checked this many hours past the last leg takeoff
 _FIR_EXCLUSION_NM    = 10.0 # FIR diamond placed outside this radius of any airport
@@ -980,6 +986,9 @@ def generate_hira():
     into every group dir. A generation failure returns 503 and caches nothing, so the
     client's Retry re-attempts.
     """
+    if not HIRA_ENABLED:
+        return jsonify({"error": "HIRA is disabled"}), 404
+
     run_id  = (request.get_json(silent=True) or {}).get("run_id")
     run_dir = _run_dir_if_complete(run_id)
     if run_dir is None:
