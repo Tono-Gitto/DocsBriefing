@@ -52,6 +52,12 @@ self.addEventListener('activate', event => {
         .filter(n => n.startsWith('shell-') && n !== SHELL_VERSION)
         .map(n => caches.delete(n))
     );
+    // Sweep incomplete briefing buckets left by a sweep that never finished —
+    // the swap in runSweep only runs on success, so without this a partial
+    // bucket could sit alongside a complete one indefinitely.
+    for (const n of names.filter(n => n.startsWith(BRIEFING_NS))) {
+      if (!(await isComplete(n))) await caches.delete(n);
+    }
     await self.clients.claim();
   })());
 });
@@ -65,6 +71,25 @@ self.addEventListener('activate', event => {
 // was instead of restarting.
 
 let _sweep = { runId: null, state: 'idle', done: 0, total: 0, missing: 0, promise: null };
+
+// Written into a briefing bucket only once every manifest entry is cached, so
+// "complete" is a property of the cache itself rather than of the worker's
+// in-memory state — which does not survive the worker going idle.
+const COMPLETE_MARKER = '/__briefing_complete__';
+
+async function isComplete(cacheName) {
+  return !!(await (await caches.open(cacheName)).match(COMPLETE_MARKER));
+}
+
+/** Drop other briefing buckets. completeOnly:true drops all of them (a new
+ *  complete briefing supersedes everything); false spares complete ones. */
+async function dropBriefingCaches(keepRunId, { completeOnly }) {
+  const keep  = briefingCache(keepRunId);
+  const names = (await caches.keys()).filter(n => n.startsWith(BRIEFING_NS) && n !== keep);
+  for (const n of names) {
+    if (completeOnly || !(await isComplete(n))) await caches.delete(n);
+  }
+}
 
 async function broadcast(msg) {
   const clients = await self.clients.matchAll({ includeUncontrolled: true });
@@ -162,19 +187,19 @@ async function runSweep(runId) {
   if (missing) {
     // Say so rather than showing green over an incomplete briefing, and keep
     // the previous run's cache: a complete old briefing beats a partial new one.
+    // Other *incomplete* buckets are still cleared, so a string of failed
+    // sweeps cannot accumulate — at most one complete plus this partial one.
+    await dropBriefingCaches(runId, { completeOnly: false });
     _sweep.state = 'partial';
     await broadcast(sweepStatus());
     return;
   }
 
+  await briefing.put(COMPLETE_MARKER, new Response('1'));
+
   // Swap only now: until this line the previous briefing is still intact, so
   // the device is never between two incomplete ones.
-  const names = await caches.keys();
-  await Promise.all(
-    names
-      .filter(n => n.startsWith(BRIEFING_NS) && n !== briefingCache(runId))
-      .map(n => caches.delete(n))
-  );
+  await dropBriefingCaches(runId, { completeOnly: true });
 
   _sweep.state = 'ready';
   await broadcast(sweepStatus());
@@ -231,7 +256,13 @@ async function hiraFetch(request) {
   // Network-first, and NEVER cache a negative. hira.json legitimately goes
   // 404 -> 200 when the crew generates a brief; a cached 404 would leave the
   // button dotless forever with a valid brief sitting on the server.
-  const cache = await caches.open(briefingCache(_sweep.runId || ''));
+  //
+  // The run comes from the URL, never from _sweep: a worker is killed when it
+  // goes idle, so on a reload where the crew taps HIRA before the sweep has
+  // re-run, _sweep.runId is null and this would write into a bucket named
+  // literally "briefing-" that nothing ever reads.
+  const runId = new URL(request.url).pathname.split('/')[2];
+  const cache = await caches.open(briefingCache(runId));
   try {
     const res = await fetch(request);
     if (res.ok) cache.put(request, res.clone());
