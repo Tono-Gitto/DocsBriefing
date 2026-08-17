@@ -52,6 +52,11 @@ os.makedirs(RUNS_DIR,   exist_ok=True)
 # modal are left intact — flip both flags back on to restore the feature.
 HIRA_ENABLED = False
 
+# Force /sw.js to serve the self-destructing kill switch even when the real
+# worker is present — the emergency stop for the offline feature that does not
+# require a revert or a redeploy of anything else. See static/sw-killswitch.js.
+SW_KILL_SWITCH = False
+
 _DEFAULT_TAXI_MIN    = 20    # fallback when OFP TAXI line is absent; shifts all ref_times if wrong
 _FIR_FLIGHT_WINDOW_H = 24   # FIR NOTAMs checked this many hours past the last leg takeoff
 _FIR_EXCLUSION_NM    = 10.0 # FIR diamond placed outside this radius of any airport
@@ -882,6 +887,28 @@ def generate_hira():
     if payload is None:
         return jsonify({"error": "AI synthesis unavailable — retry"}), 503
     return jsonify(payload), 200
+
+
+@app.route("/sw.js")
+def service_worker():
+    """Served from the root, not /static/ — a service worker can only control
+    pages at or below its own path, and this one must cover /map and /data/.
+
+    Falls back to the kill switch whenever the real worker is absent, which is
+    exactly the state a revert of the offline feature leaves behind. That makes
+    backing out self-healing: registered workers update to a script that
+    deletes its caches and unregisters itself, instead of 404ing and lingering.
+    Set SW_KILL_SWITCH to force the same teardown without reverting anything.
+    """
+    real = os.path.join(HERE, "static", "sw.js")
+    name = "sw.js" if (os.path.exists(real) and not SW_KILL_SWITCH) else "sw-killswitch.js"
+    resp = send_from_directory(os.path.join(HERE, "static"), name,
+                               mimetype="application/javascript")
+    # Never let a stale worker pin itself: the browser re-checks this file to
+    # discover updates, which is what drives both the "New version" reload chip
+    # and the kill switch reaching devices at all.
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 @app.route("/data/<filename>")
