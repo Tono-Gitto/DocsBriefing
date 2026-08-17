@@ -635,9 +635,17 @@
 <div id="status">Loading…</div>
 
 <script>
-// ── Group URL param (which map tab: ?g=1 or ?g=2) ─────────────────────────
-const GROUP = new URLSearchParams(location.search).get("g") || "1";
-const DATA  = f => `/data/${GROUP}/${f}`;
+// ── Run + group URL params (?r=<run_id>&g=1|2) ────────────────────────────
+// RUN is what keeps a cached briefing tied to its own flight: without it every
+// flight's airports.json shares one URL, so an offline device would serve the
+// previous flight's weather under the current flight's number. Empty RUN falls
+// back to the legacy flat /data/<file> route, which serves the CLI-produced
+// data/ folder (MVP demo only — no groups, no run scoping).
+const _params = new URLSearchParams(location.search);
+const RUN     = _params.get("r") || "";
+const GROUP   = _params.get("g") || "1";
+const DATA    = f => RUN ? `/data/${RUN}/${GROUP}/${f}` : `/data/${f}`;
+const MANIFEST_URL = RUN ? `/data/${RUN}/manifest.json` : null;
 
 const ROUTE_COLORS = ["#5b9ef4", "#f4a15b"];  // leg 1 = blue, leg 2 = orange
 
@@ -1718,7 +1726,11 @@ function _generateHira() {
   if (_hiraLoading) return;
   _hiraLoading = true;
   _hiraStatus('<div class="hira-spinner"></div><div>Generating HIRA brief…<br><span style="font-size:0.8rem;color:#667">this can take up to ~30 seconds</span></div>');
-  fetch('/api/hira', { method: 'POST' })
+  fetch('/api/hira', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ run_id: RUN }),
+  })
     .then(r => r.ok ? r.json() : Promise.reject(r))
     .then(hira => { _hira = hira; _applyHiraRisk(hira.risk); _renderHiraBrief(); })
     .catch(() => {
