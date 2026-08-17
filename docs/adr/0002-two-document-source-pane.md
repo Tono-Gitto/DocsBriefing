@@ -194,3 +194,21 @@ margin (`x0` near 0) was permanently clipped, not just offscreen-but-reachable. 
 flipping the tag to the box's right edge (`.src-fill-tag-right`) whenever `x0 < 0.05`; the
 right side can overflow the visible pane under `overflow-x: auto` but stays *reachable* by
 scrolling, which is why only the left side needed the flip.
+
+## Amendment — 2026-08-17: the pane covers the map instead of splitting the screen with it
+
+The pane's outer geometry described under Context (50vw beside the map, 50vh stacked above it
+on narrow viewports) is superseded. It now fills every pixel from the left edge to the weather
+panel — full height below the header, at every viewport width — so an open pane hides the map
+completely rather than sharing the screen with a squeezed-down copy of it. Reading the original
+document is a focused act; a half-width map alongside it was competing for attention while
+being too small to work with.
+
+The weather panel is deliberately *not* covered. Tapping its MET/NOTAM rows is the only way to
+move the highlight, so a full-screen pane would strand the pilot on whichever anchor opened it.
+Consequence on portrait/phone widths, accepted knowingly: `--panel-w: min(75vw, 560px)` leaves
+the pane ~25vw there; closing the panel reclaims the full width.
+
+Everything this ADR actually decided is unaffected — the 25/75 stacked split, the narrow-viewport
+accordion, per-document highlights, and MET whole-block anchor granularity all sit *inside* the
+pane and are indifferent to its outer size.

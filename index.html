@@ -12,18 +12,9 @@
     * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     body { font-family: -apple-system, sans-serif; background: #1a1a2e; color: #eee; }
 
-    :root { --panel-w: 440px; --src-w: 50vw; }
+    :root { --panel-w: 440px; }
     @media (max-width: 900px) {
       :root { --panel-w: min(75vw, 560px); }
-      /* Narrow viewports: Source Pane stacks above the map instead of beside it */
-      #srcPane {
-        left: 0; right: 0; width: auto;
-        top: 58px; bottom: auto; height: 50vh;
-        border-right: none; border-bottom: 1px solid #2a2d50;
-        transform: translateY(-100%);
-      }
-      body.src-open #srcPane { transform: translateY(0); }
-      body.src-open #map { left: 0; top: calc(58px + 50vh); }
     }
 
     /* ── Header ── */
@@ -38,14 +29,15 @@
     #header span { font-size: 0.85rem; color: #778; }
 
     /* ── Map ── */
+    /* The Source Pane covers the map rather than shrinking it (see #srcPane
+       below), so only the weather panel moves the map's edge. */
     #map {
       position: fixed;
       top: 58px; left: 0; bottom: 0;
       right: 0;
-      transition: right 0.25s ease, left 0.25s ease, top 0.25s ease;
+      transition: right 0.25s ease;
     }
     body.panel-open #map { right: var(--panel-w); }
-    body.src-open   #map { left: var(--src-w); }
 
     .leaflet-tile { filter: brightness(0.85) saturate(0.7); }
 
@@ -95,19 +87,21 @@
     .nav-btn:hover  { background: #22254a; border-color: #404880; }
     .nav-btn:active { background: #2a2e58; }
 
-    /* ── Source Pane (original MET + NOTAM PDFs, click-to-highlight) ── */
+    /* ── Source Pane (original MET + NOTAM PDFs, click-to-highlight) ──
+       Fills every pixel left of the weather panel — the map is completely
+       hidden behind it, at every viewport width. The panel deliberately stays
+       visible: tapping its MET/NOTAM rows is how the highlight is driven. */
     #srcPane {
       position: fixed;
-      top: 58px; left: 0; bottom: 0;
-      width: var(--src-w);
+      top: 58px; left: 0; right: 0; bottom: 0;
       background: #0d0e1c;
-      border-right: 1px solid #2a2d50;
       transform: translateX(-100%);
-      transition: transform 0.25s ease;
+      transition: transform 0.25s ease, right 0.25s ease;
       z-index: 850;
       display: flex; flex-direction: column;
     }
-    body.src-open #srcPane { transform: translateX(0); }
+    body.panel-open #srcPane { right: var(--panel-w); }
+    body.src-open   #srcPane { transform: translateX(0); }
     #srcPane-header {
       flex-shrink: 0;
       display: flex; align-items: center; justify-content: space-between;
@@ -189,8 +183,8 @@
       border-width: 2px;
       border-style: solid;
     }
-    /* Narrow viewports: accordion — the expanded section fills the 50vh band;
-       JS (_isNarrow / _setSectionCollapsed) enforces exactly one open. */
+    /* Narrow viewports: accordion — the expanded section fills the pane's full
+       height; JS (_isNarrow / _setSectionCollapsed) enforces exactly one open. */
     @media (max-width: 900px) {
       .src-doc-section[data-doc="met"],
       .src-doc-section[data-doc="notam"] { flex: 1 1 auto; }
@@ -469,8 +463,10 @@
     .filtered-expand:hover { color: #778; }
 
     /* ── Status chip ── */
+    /* z-index below #srcPane's 850 (same as #wxLegend): it is map chrome, so it
+       must bury behind an open Source Pane rather than float over a PDF page. */
     #status {
-      position: fixed; bottom: 16px; right: 16px; z-index: 1000;
+      position: fixed; bottom: 16px; right: 16px; z-index: 500;
       background: rgba(20,20,40,0.90); padding: 7px 14px;
       border-radius: 6px; font-size: 0.78rem; color: #667;
     }
@@ -790,7 +786,7 @@ function openSrcPane() {
   _srcPane.open = true;
   document.body.classList.add('src-open');
   document.getElementById('docBtn')?.classList.add('src-active');
-  map.invalidateSize();
+  // No map.invalidateSize() — the pane covers the map, it never resizes it.
 }
 
 function closeSrcPane() {
@@ -799,7 +795,6 @@ function closeSrcPane() {
   document.getElementById('docBtn')?.classList.remove('src-active');
   _clearDocHighlight('met');
   _clearDocHighlight('notam');
-  map.invalidateSize();
 }
 
 function toggleSrcPane() {
