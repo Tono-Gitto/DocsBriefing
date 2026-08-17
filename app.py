@@ -7,8 +7,10 @@ Routes:
   POST /upload        → validate + save 3 PDFs → start background pipeline → /progress/<id>
   GET  /progress/<id> → polling progress page
   GET  /api/status/<id> → JSON pipeline status
-  GET  /map           → index.html (MVP Leaflet map, unmodified)
-  GET  /data/<f>      → serve JSON from current run dir (fallback: data/)
+  GET  /map           → index.html (briefing UI; ?r=<run_id>&g=<group>)
+  GET  /data/<run_id>/manifest.json      → precache list + completion marker
+  GET  /data/<run_id>/<group>/<f>        → serve briefing data for that run
+  GET  /data/<f>      → legacy MVP demo fallback (static data/ folder)
 
 Security:
   ANTHROPIC_API_KEY loaded from .env via python-dotenv — never sent to browser.
@@ -597,6 +599,103 @@ def _run_source_pane_step(notam_path, met_path, group_dirs):
         _progress(f"⚠ MET source-document rendering failed — MET pane unavailable ({type(exc).__name__})")
 
 
+# ── Basemap tiles ─────────────────────────────────────────────────────────────
+
+def _run_tile_step(group_dirs):
+    """Fetch the route corridor's basemap tiles. Returns manifest entries.
+
+    Once per run, not per group: a 3–4 leg upload's two map tabs share one
+    tile set, and the bbox unions every leg across both groups or group 2's
+    map opens over blank tiles.
+    """
+    import tile_store
+
+    route_files = [
+        os.path.join(d, n)
+        for d in group_dirs for n in sorted(os.listdir(d))
+        if n.startswith("route_") and n.endswith(".json")
+    ]
+    bbox = tile_store.bbox_for_routes(route_files)
+    if bbox is None:
+        _progress("⚠ no route waypoints — skipping basemap tiles")
+        return []
+
+    tiles   = tile_store.tiles_for_bbox(bbox)
+    ceiling = tile_store.zoom_ceiling(tiles)
+    _progress(f"Fetching basemap: {len(tiles)} tiles, z0–z{ceiling}…")
+    fetched, skipped, failed = tile_store.fetch_tiles(tiles, progress=_progress)
+    _progress(f"Basemap ready — {fetched} fetched, {skipped} already cached, {failed} failed.")
+
+    # Leaflet reads this to set maxNativeZoom, so it upscales past the cached
+    # ceiling instead of requesting tiles that were never fetched.
+    for group_dir in group_dirs:
+        with open(os.path.join(group_dir, "basemap.json"), "w") as f:
+            json.dump({"max_native_zoom": ceiling, "tile_count": len(tiles)}, f, indent=2)
+
+    # Only list tiles that actually made it to disk — a manifest entry the
+    # precache can't fetch would stall the readiness chip forever.
+    return [e for e, t in zip(tile_store.manifest_entries(tiles), tiles)
+            if os.path.exists(tile_store.tile_path(*t))]
+
+
+# ── Run manifest ──────────────────────────────────────────────────────────────
+
+# Written after everything else the pipeline produces. Two jobs in one file:
+#   1. the precache list — the service worker cannot enumerate notam_page_NNN.png
+#      on its own, so every file the offline briefing needs is named here;
+#   2. the completion marker — "manifest exists" is what the data routes gate on,
+#      replacing the old in-memory `_current_run["status"] == "done"` check.
+# Nothing the pipeline writes may land after it, or the manifest would be
+# serving an incomplete run as complete.
+#
+# hira.json and bundle.html are deliberately NOT listed: both are written on
+# demand, long after the manifest, so a "manifest ≡ files on disk" assertion
+# would go red the first time anyone taps HIRA. See docs/adr/0003.
+_MANIFEST_EXCLUDE = {"manifest.json", "hira.json", "bundle.html"}
+
+
+def _build_manifest(run_id, group_dirs, extra_files=()):
+    """Collect every pipeline-written file in the run, as run-dir-relative paths."""
+    run_dir = os.path.join(RUNS_DIR, run_id)
+    files   = []
+    for group_dir in sorted(group_dirs):
+        group = os.path.basename(group_dir)
+        for name in sorted(os.listdir(group_dir)):
+            if name in _MANIFEST_EXCLUDE or name.startswith("_"):
+                continue
+            if os.path.isfile(os.path.join(group_dir, name)):
+                files.append(f"{group}/{name}")
+    return {
+        "run_id":        run_id,
+        "generated_iso": datetime.now(timezone.utc).isoformat(),
+        "groups":        [int(os.path.basename(d)) for d in sorted(group_dirs)],
+        "files":         files + list(extra_files),
+    }
+
+
+def _write_manifest(run_id, group_dirs, extra_files=()):
+    manifest = _build_manifest(run_id, group_dirs, extra_files)
+    path = os.path.join(RUNS_DIR, run_id, "manifest.json")
+    with open(path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    return manifest
+
+
+def _run_dir_if_complete(run_id):
+    """Resolve a run directory, or None if the run is absent or incomplete.
+
+    The manifest is the completion marker — see _write_manifest. run_id comes
+    from the request, never from `_current_run`, so an older briefing keeps
+    working after a newer upload (the wrong-flight-tab bug this replaces).
+    """
+    if not run_id or not re.fullmatch(r"[0-9a-fA-F-]{36}", run_id):
+        return None
+    run_dir = os.path.join(RUNS_DIR, run_id)
+    if not os.path.exists(os.path.join(run_dir, "manifest.json")):
+        return None
+    return run_dir
+
+
 # ── Pipeline background thread ────────────────────────────────────────────────
 
 def _progress(msg):
@@ -705,6 +804,21 @@ def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
         # NOTE: the HIRA brief is generated on demand (POST /api/hira), not here —
         # keeps uploads fast and spends AI tokens only when the crew opens the brief.
 
+        # Run-level, like the source-pane step: one tile set covers every group,
+        # and it needs route_<n>.json so it cannot run before step 2. Its own
+        # try/except — a basemap is a nicety; a tile failure must never fail the
+        # briefing, it just degrades the map.
+        tile_entries = []
+        try:
+            tile_entries = _run_tile_step(group_dirs)
+        except Exception as exc:
+            _progress(f"⚠ basemap tile fetch failed — map will need a connection ({type(exc).__name__})")
+
+        # Manifest LAST — it is the completion marker the data routes gate on.
+        # Nothing the pipeline writes may land after this line.
+        _write_manifest(run_id, group_dirs, tile_entries)
+        _progress("Manifest written — run is complete.")
+
         with _lock:
             _current_run["status"] = "done"
             _current_run["run_id"] = run_id
@@ -776,7 +890,9 @@ def upload_files():
 
     upload_dir = os.path.join(UPLOAD_DIR, run_id)
     try:
-        # Sweep run dirs older than 24 h
+        # Sweep run dirs older than 24 h. Deliberately walks RUNS_DIR only —
+        # the basemap tile store lives in data/tiles/ precisely so it survives
+        # this and stays shared across flights (tile_store.py).
         cutoff = time.time() - 86400
         for name in os.listdir(RUNS_DIR):
             path = os.path.join(RUNS_DIR, name)
@@ -839,20 +955,36 @@ def map_page():
     return send_file(os.path.join(HERE, "index.html"))
 
 
-@app.route("/data/<int:group>/<filename>")
-def serve_group_data(group, filename):
-    with _lock:
-        run_id = _current_run.get("run_id")
-        status = _current_run.get("status")
-    if run_id and status == "done":
-        # send_from_directory rejects path traversal and 404s missing files
-        return send_from_directory(os.path.join(RUNS_DIR, run_id, str(group)), filename)
-    return Response("Not found", status=404)
+@app.route("/data/<run_id>/<int:group>/<filename>")
+def serve_group_data(run_id, group, filename):
+    """Run-scoped briefing data.
+
+    The run_id in the URL is what makes offline caching safe: without it every
+    flight's airports.json shares one cache key, and an offline device would
+    serve the previous flight's weather under the current flight's number.
+    """
+    run_dir = _run_dir_if_complete(run_id)
+    if run_dir is None:
+        return Response("Not found", status=404)
+    # send_from_directory rejects path traversal and 404s missing files
+    return send_from_directory(os.path.join(run_dir, str(group)), filename)
+
+
+@app.route("/data/<run_id>/manifest.json")
+def serve_manifest(run_id):
+    run_dir = _run_dir_if_complete(run_id)
+    if run_dir is None:
+        return Response("Not found", status=404)
+    return send_from_directory(run_dir, "manifest.json")
 
 
 @app.route("/api/hira", methods=["POST"])
 def generate_hira():
-    """On-demand HIRA brief for the current run (triggered by the map's HIRA button).
+    """On-demand HIRA brief for the requested run (triggered by the map's HIRA button).
+
+    run_id comes from the POST body, not `_current_run` — otherwise a two-sector day
+    breaks: upload TG415, upload TG970, then tap HIRA on TG415's still-open tab and
+    the run has moved on underneath it. Same manifest gate as serve_group_data.
 
     Whole-flight, so it spans every group dir. Cache-first: if hira.json already exists
     it's returned as-is (no API call); otherwise Sonnet is called and the result cached
@@ -862,13 +994,11 @@ def generate_hira():
     if not HIRA_ENABLED:
         return jsonify({"error": "HIRA is disabled"}), 404
 
-    with _lock:
-        run_id = _current_run.get("run_id")
-        status = _current_run.get("status")
-    if not (run_id and status == "done"):
+    run_id  = (request.get_json(silent=True) or {}).get("run_id")
+    run_dir = _run_dir_if_complete(run_id)
+    if run_dir is None:
         return jsonify({"error": "no completed run"}), 404
 
-    run_dir = os.path.join(RUNS_DIR, run_id)
     group_dirs = sorted(
         os.path.join(run_dir, d) for d in os.listdir(run_dir)
         if os.path.isdir(os.path.join(run_dir, d))
@@ -887,6 +1017,29 @@ def generate_hira():
     if payload is None:
         return jsonify({"error": "AI synthesis unavailable — retry"}), 503
     return jsonify(payload), 200
+
+
+@app.route("/bundle/<run_id>")
+def serve_bundle(run_id):
+    """Self-contained offline briefing — one ~25 MB .html with everything inlined.
+
+    Cache-first on disk, mirroring the POST /api/hira idiom: a crew that never
+    downloads a bundle never pays the build cost. Written into the run dir, and
+    deliberately absent from the manifest (it is produced long after it).
+    """
+    run_dir = _run_dir_if_complete(run_id)
+    if run_dir is None:
+        return Response("Not found", status=404)
+
+    path = os.path.join(run_dir, "bundle.html")
+    if not os.path.exists(path):
+        import bundle_builder
+        try:
+            bundle_builder.build_to_file(run_dir)
+        except Exception as exc:
+            print(f"[bundle] build failed: {type(exc).__name__}: {exc}", flush=True)
+            return Response("Bundle build failed", status=503)
+    return send_from_directory(run_dir, "bundle.html", as_attachment=False)
 
 
 @app.route("/sw.js")
@@ -909,6 +1062,21 @@ def service_worker():
     # and the kill switch reaching devices at all.
     resp.headers["Cache-Control"] = "no-cache"
     return resp
+
+
+@app.route("/tiles/<int:z>/<int:x>/<int:y>.png")
+def serve_tile(z, x, y):
+    """Basemap tiles from our own origin — see tile_store.py for why.
+
+    Shared across every run, so this is deliberately NOT run-scoped and is
+    exempt from the runs/ sweep.
+    """
+    import tile_store
+    path = tile_store.tile_path(z, x, y)
+    if not os.path.exists(path):
+        return Response("Not found", status=404)
+    return send_from_directory(os.path.dirname(path), os.path.basename(path),
+                               max_age=31536000)
 
 
 @app.route("/data/<filename>")
@@ -977,8 +1145,8 @@ _PROGRESS_HTML = """<!doctype html>
           if (data.status === "done") {
             clearInterval(timer);
             setTimeout(() => {
-              if (groupCount > 1) window.open("/map?g=2", "_blank");
-              window.location.href = "/map?g=1";
+              if (groupCount > 1) window.open("/map?r=" + runId + "&g=2", "_blank");
+              window.location.href = "/map?r=" + runId + "&g=1";
             }, 1200);
           } else if (data.status === "error") {
             clearInterval(timer);
