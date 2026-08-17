@@ -605,6 +605,13 @@
     <span id="ageChip" class="hdr-chip" style="display:none"></span>
     <button id="updateBtn" class="hdr-chip hdr-chip-btn" style="display:none"
             onclick="_applyUpdate()">↻ New version</button>
+    <!-- Server-independent copy: outlives the 24 h sweep and a redeploy, and
+         AirDrops to the other pilot. Hidden inside the bundle itself, where
+         it could only offer a download that cannot work from file://. -->
+    <button id="bundleBtn" class="hdr-chip hdr-chip-btn" style="display:none"
+            onclick="_downloadBundle()">⬇ Bundle</button>
+    <button id="groupBtn" class="hdr-chip hdr-chip-btn" style="display:none"
+            onclick="_switchGroup()"></button>
     <button id="docBtn" style="display:none" onclick="toggleSrcPane()">DOC</button>
     <button id="flightBtn" onclick="openFlightPanel()">FLIGHT <span id="flightBadge"></span></button>
     <button id="hiraBtn" onclick="openHira()">HIRA <span id="hiraDot"></span></button>
@@ -675,11 +682,19 @@
 // previous flight's weather under the current flight's number. Empty RUN falls
 // back to the legacy flat /data/<file> route, which serves the CLI-produced
 // data/ folder (MVP demo only — no groups, no run scoping).
+// BUNDLE is set only in the self-contained offline bundle (bundle_builder.py),
+// where every asset is an inlined data: URI and there is no server at all. It
+// is deliberately the ONLY fork in this file — same briefing logic either way.
+const BUNDLE  = window.__BUNDLE__ || null;
 const _params = new URLSearchParams(location.search);
-const RUN     = _params.get("r") || "";
-const GROUP   = _params.get("g") || "1";
-const DATA    = f => RUN ? `/data/${RUN}/${GROUP}/${f}` : `/data/${f}`;
-const MANIFEST_URL = RUN ? `/data/${RUN}/manifest.json` : null;
+// file:// URLs make query params awkward, so the bundle carries its group in
+// the hash instead; everything else is identical.
+const _hashG  = (location.hash.match(/g=(\d)/) || [])[1];
+const RUN     = BUNDLE ? (BUNDLE.run_id || "bundle") : (_params.get("r") || "");
+const GROUP   = BUNDLE ? (_hashG || "1") : (_params.get("g") || "1");
+const DATA    = f => BUNDLE ? (BUNDLE.assets[`${GROUP}/${f}`] || `data:application/json,null`)
+                            : (RUN ? `/data/${RUN}/${GROUP}/${f}` : `/data/${f}`);
+const MANIFEST_URL = (RUN && !BUNDLE) ? `/data/${RUN}/manifest.json` : null;
 
 const ROUTE_COLORS = ["#5b9ef4", "#f4a15b"];  // leg 1 = blue, leg 2 = orange
 
@@ -709,23 +724,36 @@ const map = L.map("map", { center: [30, 60], zoom: 3 });
 // service worker treats them as ordinary manifest entries, and OSM gets one
 // fetch per tile ever instead of one per device per flight. A run without a
 // cached basemap (legacy data, or a failed tile step) falls back to OSM direct.
-const _tileLayer = L.tileLayer(
-  RUN ? "/tiles/{z}/{x}/{y}.png" : "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-  {
-    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-    maxZoom: 18,
-    // Start at the shallowest real ceiling and raise it once basemap.json
-    // loads: guessing high would request tiles that were never fetched, and
-    // every one of those is a 404 the service worker cannot answer offline.
-    maxNativeZoom: 6,
-  }
-).addTo(map);
+// In bundle mode tiles are inlined too, so the URL template is replaced by a
+// lookup into the same asset map — a miss returns Leaflet's blank tile rather
+// than a wrong one.
+const _BundleTiles = L.TileLayer.extend({
+  getTileUrl: function (c) {
+    return BUNDLE.assets[`tiles/${this._getZoomForUrl()}/${c.x}/${c.y}.png`] ||
+           L.Util.emptyImageUrl;
+  },
+});
+const _tileOpts = {
+  attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+  maxZoom: 18,
+  // Start at the shallowest real ceiling and raise it once basemap.json
+  // loads: guessing high would request tiles that were never fetched, and
+  // every one of those is a 404 the service worker cannot answer offline.
+  maxNativeZoom: 6,
+};
+const _tileLayer = BUNDLE
+  ? new _BundleTiles("", _tileOpts)
+  : L.tileLayer(
+      RUN ? "/tiles/{z}/{x}/{y}.png" : "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+      _tileOpts
+    );
+_tileLayer.addTo(map);
 
 // The pipeline caches z0 down to whatever depth fits its tile budget, so the
 // ceiling varies by route: a long-haul reaches z6, a turnaround z9. Telling
 // Leaflet where it stops makes it upscale the parent tile past that point
 // rather than requesting tiles that were never fetched — blurry, never blank.
-if (RUN) {
+if (RUN || BUNDLE) {
   fetch(DATA("basemap.json"))
     .then(r => r.ok ? r.json() : null)
     .then(b => {
@@ -1909,8 +1937,48 @@ function _watchForUpdate(reg) {
   });
 }
 
+function _downloadBundle() {
+  const btn = document.getElementById('bundleBtn');
+  btn.textContent = '⬇ Building…';
+  // Server-side build can take ~20 s the first time; cached on disk after.
+  fetch(`/bundle/${RUN}`)
+    .then(r => r.ok ? r.blob() : Promise.reject(r))
+    .then(blob => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `briefing_${(document.title.split(' ')[0] || RUN)}.html`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      btn.textContent = '⬇ Bundle';
+    })
+    .catch(() => { btn.textContent = '⚠ Bundle failed'; });
+}
+
+function _switchGroup() {
+  // Inside the bundle there is no ?g= to change — one file holds every group,
+  // so the group rides in the hash and a reload re-runs the normal init path.
+  const next = GROUP === '1' ? '2' : '1';
+  if (BUNDLE) { location.hash = `g=${next}`; location.reload(); }
+  else        { location.search = `?r=${RUN}&g=${next}`; }
+}
+
 function _initOffline() {
+  const groups = BUNDLE ? (BUNDLE.groups || [1]) : [];
+  if (groups.length > 1) {
+    const btn = document.getElementById('groupBtn');
+    btn.textContent = `Group ${GROUP} ⇄`;
+    btn.style.display = '';
+  }
+
+  if (BUNDLE) {
+    // Already fully self-contained: nothing to cache, nothing to download.
+    _chip('offlineChip', '✓ Offline bundle', 'chip-ready');
+    _renderAge(BUNDLE.generated_iso);
+    return;
+  }
+
   if (!RUN) return;   // legacy/demo data has no run to cache
+  document.getElementById('bundleBtn').style.display = '';
 
   // Read the manifest for the age stamp even where no SW can run — the age
   // warning is about trusting the weather, not about caching.

@@ -1,7 +1,13 @@
 # ADR 0003 — Offline briefing: run-scoped URLs, service-worker precache, self-contained bundle
 
 Date: 2026-08-17
-Status: Accepted (design; not yet implemented)
+Status: Accepted — implemented on branch `offline-briefing` (slices 1–4)
+
+Verified locally by killing the server outright (not a DevTools checkbox) and reloading: the
+map, basemap tiles, markers and both Source Pane documents all render, and `/` redirects to the
+cached briefing. The bundle was verified by serving it alone from a bare static server with no
+app routes. **Not yet verified on the target device** — that needs airplane mode on the iPad
+after a reboot, per the procedure in CLAUDE.md.
 
 ## Context
 

@@ -107,10 +107,82 @@ class TestTileFetch:
     def test_manifest_entries_are_origin_paths(self):
         assert tile_store.manifest_entries([(6, 50, 28)]) == ["tiles/6/50/28.png"]
 
-    def test_tile_store_lives_outside_runs(self):
+    def test_tile_store_lives_outside_runs_(self):
         """The 24 h sweep walks runs/ — a store inside it would be deleted and
         the cross-flight sharing would buy nothing."""
         assert "runs" not in os.path.relpath(tile_store.TILE_DIR, tile_store.HERE).split(os.sep)
+
+
+class TestBundleBuilder:
+    """The bundle is a briefing that must work with no server at all, so the
+    thing worth testing is that nothing server-shaped survives into it."""
+
+    @pytest.fixture
+    def built(self, tmp_path):
+        import bundle_builder
+
+        run_dir = tmp_path / "run"
+        (run_dir / "1").mkdir(parents=True)
+        (run_dir / "1" / "airports.json").write_text('[{"icao":"VTBS"}]')
+        (run_dir / "1" / "met_page_001.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        tiles = tmp_path / "tiles" / "6" / "50"
+        tiles.mkdir(parents=True)
+        (tiles / "28.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (run_dir / "manifest.json").write_text(json.dumps({
+            "run_id": "abc", "generated_iso": "2026-08-17T04:46:00+00:00",
+            "groups": [1],
+            "files": ["1/airports.json", "1/met_page_001.png", "tiles/6/50/28.png"],
+        }))
+        html = bundle_builder.build(str(run_dir), tile_root=str(tmp_path / "tiles"))
+        return html
+
+    def test_every_manifest_entry_is_inlined(self, built):
+        for key in ("1/airports.json", "1/met_page_001.png", "tiles/6/50/28.png"):
+            assert f'"{key}":"data:' in built.replace(", ", ",")
+
+    def test_no_server_paths_survive(self, built):
+        """Any of these left behind is a request that fails from file://."""
+        for path in ('href="/static/', 'src="/static/', '/static/app.webmanifest'):
+            assert path not in built
+
+    def test_leaflet_is_inlined(self, built):
+        assert "/static/leaflet.js" not in built
+        assert "/static/leaflet.css" not in built
+
+    def test_bundle_global_precedes_data_helper(self, built):
+        """__BUNDLE__ must exist when DATA() is *defined*, not merely later."""
+        assert built.index("window.__BUNDLE__=") < built.index("const DATA")
+
+    def test_script_terminator_is_escaped(self, tmp_path):
+        """A literal </ inside the JSON would close the <script> block early."""
+        import bundle_builder
+
+        run_dir = tmp_path / "run"
+        (run_dir / "1").mkdir(parents=True)
+        (run_dir / "1" / "airports.json").write_text('"</script><b>"')
+        (run_dir / "manifest.json").write_text(json.dumps({
+            "run_id": "abc", "groups": [1], "files": ["1/airports.json"],
+        }))
+        html = bundle_builder.build(str(run_dir), tile_root=str(tmp_path))
+        head = html[html.index("window.__BUNDLE__="):]
+        assert "</" not in head[:head.index("</script>")]
+
+    def test_carries_run_identity(self, built):
+        assert '"run_id":"abc"' in built
+        assert '"generated_iso":"2026-08-17T04:46:00+00:00"' in built
+
+    def test_missing_anchor_raises(self, tmp_path):
+        """Fail loudly if index.html is restructured — a silently un-injected
+        bundle would look fine and be completely empty."""
+        import bundle_builder
+
+        run_dir = tmp_path / "run"
+        (run_dir / "1").mkdir(parents=True)
+        (run_dir / "manifest.json").write_text(json.dumps({"files": [], "groups": [1]}))
+        stub = tmp_path / "index.html"
+        stub.write_text("<html><body>no anchor here</body></html>")
+        with pytest.raises(ValueError, match="anchor"):
+            bundle_builder.build(str(run_dir), tile_root=str(tmp_path), index_path=str(stub))
 
 
 PIPELINE_FILES = [

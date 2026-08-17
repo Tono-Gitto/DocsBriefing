@@ -1005,6 +1005,29 @@ def generate_hira():
     return jsonify(payload), 200
 
 
+@app.route("/bundle/<run_id>")
+def serve_bundle(run_id):
+    """Self-contained offline briefing — one ~25 MB .html with everything inlined.
+
+    Cache-first on disk, mirroring the POST /api/hira idiom: a crew that never
+    downloads a bundle never pays the build cost. Written into the run dir, and
+    deliberately absent from the manifest (it is produced long after it).
+    """
+    run_dir = _run_dir_if_complete(run_id)
+    if run_dir is None:
+        return Response("Not found", status=404)
+
+    path = os.path.join(run_dir, "bundle.html")
+    if not os.path.exists(path):
+        import bundle_builder
+        try:
+            bundle_builder.build_to_file(run_dir)
+        except Exception as exc:
+            print(f"[bundle] build failed: {type(exc).__name__}: {exc}", flush=True)
+            return Response("Bundle build failed", status=503)
+    return send_from_directory(run_dir, "bundle.html", as_attachment=False)
+
+
 @app.route("/sw.js")
 def service_worker():
     """Served from the root, not /static/ — a service worker can only control
