@@ -571,12 +571,15 @@ def _render_source_document(pdf_path, extract_fn, prefix, json_name, group_dirs)
 
     primary_dir = group_dirs[0]
     n_pages = notam_anchors.render_pages(pdf_path, primary_dir, prefix=prefix)
-    anchors, page_sizes = extract_fn(pdf_path)
+    result = extract_fn(pdf_path)
+    anchors, page_sizes = result[0], result[1]
+    extra = result[2] if len(result) > 2 else {}  # e.g. notam_anchors' {"ssa": {...}}
 
     payload = {
         "pages": n_pages,
         "page_sizes": [list(s) for s in page_sizes],
         "anchors": anchors,
+        **extra,
     }
     with open(os.path.join(primary_dir, json_name), "w") as f:
         json.dump(payload, f)

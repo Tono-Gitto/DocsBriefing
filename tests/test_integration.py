@@ -224,7 +224,7 @@ class TestNotamAnchors:
         import sys
         sys.path.insert(0, ROOT)
         from notam_anchors import extract_anchors
-        anchors, page_sizes = extract_anchors(FIXTURE_NOTAM)
+        anchors, page_sizes, extra = extract_anchors(FIXTURE_NOTAM)
         return anchors, page_sizes
 
     def test_known_airport_notam_page(self, parsed):
@@ -267,3 +267,51 @@ class TestNotamAnchors:
         missing = expected - anchors.keys()
         hit_rate = (len(expected) - len(missing)) / len(expected)
         assert hit_rate >= 0.95, f"anchor hit rate {hit_rate:.1%} below 95% target; missing: {sorted(missing)[:10]}"
+
+
+class TestNotamAnchorsSsa:
+    """The SSA006/2026 notice inside TG921's THA 00002/13 [10] — see
+    notam_anchors.py's _extract_ssa_entry / _parse_ssa_structure."""
+
+    @pytest.fixture(scope="class")
+    def ssa_entry(self):
+        import sys
+        sys.path.insert(0, ROOT)
+        from notam_anchors import extract_anchors
+        _, _, extra = extract_anchors(FIXTURE_NOTAM)
+        return extra["ssa"]["GENERAL|THA 00002/13 [10]"]
+
+    def test_fra_is_low_level(self, ssa_entry):
+        g = next(g for g in ssa_entry["groups"] if "FRA" in g["codes"])
+        assert g["level"] == "LOW"
+
+    def test_bkk_is_medium_level(self, ssa_entry):
+        g = next(g for g in ssa_entry["groups"] if "BKK" in g["codes"])
+        assert g["level"] == "MEDIUM"
+
+    def test_no_false_positive_codes_from_station_line_prefix(self, ssa_entry):
+        # "FR FLT DEP FRM STATION EUROPE:" precedes the real code list — none
+        # of those words are 3-letter, so this mainly guards against a future
+        # regression reintroducing an unscoped station-line word scan.
+        all_codes = {c for g in ssa_entry["groups"] for c in g["codes"]}
+        assert not all_codes & {"FLT", "DEP", "FRM", "FOR"}
+
+    def test_group_count_and_codes(self, ssa_entry):
+        # BB (Europe), CC (int'l), DD (domestic), EE (mainbase) — 4 groups
+        assert len(ssa_entry["groups"]) == 4
+        all_codes = {c for g in ssa_entry["groups"] for c in g["codes"]}
+        assert {"ARN", "BRU", "CDG", "CPH", "FRA", "IST", "LHR", "MUC", "MXP", "OSL", "ZRH"} <= all_codes
+        assert "BKK" in all_codes
+
+    def test_catch_all_present_and_low(self, ssa_entry):
+        assert ssa_entry["catch_all"]["level"] == "LOW"
+
+    def test_all_rects_normalized(self, ssa_entry):
+        for g in ssa_entry["groups"]:
+            for rects in list(g["codes"].values()) + [g["level_rects"]]:
+                for r in rects:
+                    assert 0 <= r["x0"] < r["x1"] <= 1, r
+                    assert 0 <= r["y0"] < r["y1"] <= 1, r
+        for r in ssa_entry["catch_all"]["level_rects"]:
+            assert 0 <= r["x0"] < r["x1"] <= 1, r
+            assert 0 <= r["y0"] < r["y1"] <= 1, r

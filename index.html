@@ -849,6 +849,10 @@ let _activeRwyFilter = null;
 let _navAirports = [];
 let _navFirs     = [];
 let _navIndex    = -1;
+// [{leg, dep:{icao,iata}, dest:{icao,iata}}, ...] — every leg's departure and
+// arrival, IATA resolved from airports.json. Populated once flight_info.json
+// and airports.json both load; used only by the SSA Source Pane fills below.
+let _legAirports = [];
 
 // ── Source Pane (original MET + NOTAM PDFs, click-to-highlight) ─────────────
 //   docs.met / docs.notam each hold their own anchors/pages/collapse state so
@@ -859,9 +863,9 @@ let _srcPane = {
   open: false,
   docs: {
     met:   { anchors: null, pageSizes: [], pages: 0, loaded: false, collapsed: false,
-             activeKey: null, selectedRowEl: null, highlightEls: [] },
+             activeKey: null, selectedRowEl: null, highlightEls: [], ssa: {} },
     notam: { anchors: null, pageSizes: [], pages: 0, loaded: false, collapsed: false,
-             activeKey: null, selectedRowEl: null, highlightEls: [] },
+             activeKey: null, selectedRowEl: null, highlightEls: [], ssa: {} },
   },
 };
 
@@ -1116,9 +1120,11 @@ function _unionRect(a, b) {
 // colors is a single hex string, or [color1, color2] when this rect is shared
 // by more than one leg (see _drawMergedFills) — a second color draws as an
 // outer ring via box-shadow so both legs stay visible on one fill instead of
-// one leg's box fully occluding the other's.
-function _appendMetFill(colors, rect, extraCls) {
-  const pageEl = document.getElementById(`src-page-met-${rect.page}`);
+// one leg's box fully occluding the other's. doc-agnostic (met or notam) —
+// shared by MET's ETA-window/baseline fills and NOTAM's SSA airport/level
+// fills, since the positioning and styling are identical either way.
+function _appendFill(doc, colors, rect, extraCls) {
+  const pageEl = document.getElementById(`src-page-${doc}-${rect.page}`);
   if (!pageEl) return;
   const list = Array.isArray(colors) ? colors : [colors];
   const fill = document.createElement('div');
@@ -1128,7 +1134,7 @@ function _appendMetFill(colors, rect, extraCls) {
   fill.style.border = `${extraCls === 'src-fill-base' ? 2 : 1}px solid ${list[0]}`;
   if (list.length > 1) fill.style.boxShadow = `0 0 0 2px ${list[1]}`;
   pageEl.appendChild(fill);
-  _srcPane.docs.met.highlightEls.push(fill);
+  _srcPane.docs[doc].highlightEls.push(fill);
 }
 
 // Baseline ("conditions at ETA") token fills: taf_base_src is a token list
@@ -1179,7 +1185,7 @@ function _resolveBaselineFillEntries(taps, words, legNum) {
 // keyed per-airport, not per-leg). Scoped to one fill category per call —
 // window fills and baseline fills are never merged with each other, since
 // their border styles intentionally mean different things (ETA±1h vs at-ETA).
-function _drawMergedFills(entries, extraCls) {
+function _drawMergedFills(doc, entries, extraCls) {
   const seen = new Map();
   const order = [];
   entries.forEach(({ rect, leg }) => {
@@ -1192,7 +1198,7 @@ function _drawMergedFills(entries, extraCls) {
   order.forEach(g => {
     const legsSorted = g.legs.slice().sort((a, b) => a - b);
     const colors = legsSorted.map(n => ROUTE_COLORS[(n - 1) % ROUTE_COLORS.length]);
-    _appendMetFill(colors, g.rect, extraCls);
+    _appendFill(doc, colors, g.rect, extraCls);
   });
 }
 
@@ -1233,10 +1239,47 @@ function _drawMetEtaFills(icao, entry) {
     baselineEntries.push(..._resolveBaselineFillEntries(leg.taf_base_src || [], words, leg.leg));
   });
 
-  _drawMergedFills(windowEntries, null);
-  _drawMergedFills(baselineEntries, 'src-fill-base');
+  _drawMergedFills('met', windowEntries, null);
+  _drawMergedFills('met', baselineEntries, 'src-fill-base');
 
   _updateMetLegend(multiLeg);
+}
+
+// SSA (Special Security Arrangement) fills: notam_anchors.py's
+// _extract_ssa_entry is flight-independent — it just records every station
+// group's code words and level-phrase geometry for a COM-INFO part shaped
+// like an SSA notice. Here, per leg, look up that leg's dep/dest IATA among
+// the parsed groups and box both the matched airport code (thicker border,
+// matching MET's src-fill-base "this is the anchor of attention" convention)
+// and that group's "LEVEL: X" phrase (thinner). An airport matched only via
+// the catch-all group has no printed code anywhere in the notice — see
+// notam_anchors.py — so only its level phrase gets a fill, never a code box
+// pointing at nothing. Leg-colored like every other multi-leg Source Pane
+// fill; a leg whose dep/dest resolves to no IATA, or matches nothing at all,
+// simply draws nothing for that airport — the same graceful-miss rule as
+// everywhere else here.
+function _drawSsaFills(key) {
+  const entry = _srcPane.docs.notam.ssa[key];
+  if (!entry) return;
+
+  const codeEntries = [];
+  const levelEntries = [];
+
+  _legAirports.forEach(la => {
+    [la.dep, la.dest].forEach(ap => {
+      if (!ap.iata) return;
+      const group = (entry.groups || []).find(g => g.codes[ap.iata]);
+      if (group) {
+        group.codes[ap.iata].forEach(r => codeEntries.push({ rect: r, leg: la.leg }));
+        group.level_rects.forEach(r => levelEntries.push({ rect: r, leg: la.leg }));
+      } else if (entry.catch_all) {
+        entry.catch_all.level_rects.forEach(r => levelEntries.push({ rect: r, leg: la.leg }));
+      }
+    });
+  });
+
+  _drawMergedFills('notam', codeEntries, 'src-fill-base');
+  _drawMergedFills('notam', levelEntries, null);
 }
 
 // Content half of a source-anchor jump: clear this doc's previous highlight,
@@ -1272,6 +1315,7 @@ function _drawDocAnchor(doc, key, rowEl) {
   });
 
   if (doc === 'met') _drawMetEtaFills(key, entry);
+  if (doc === 'notam') _drawSsaFills(key);
 
   if (firstEl) firstEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
@@ -2003,6 +2047,7 @@ function _fetchSrcDoc(doc, filename) {
     d.anchors   = data.anchors || {};
     d.pageSizes = data.page_sizes || [];
     d.pages     = data.pages || 0;
+    d.ssa       = data.ssa || {};  // notam only; harmlessly {} for met
     document.getElementById(`srcSection-${doc}`).classList.remove('src-doc-hidden');
     document.getElementById("docBtn").style.display = "";
   }).catch(() => {});
@@ -2038,6 +2083,16 @@ Promise.all([
     if (l.dep)  depSet.add(l.dep);
     if (l.dest) destSet.add(l.dest);
     if (l.dest_altn && l.dest_altn[0]) altnSet.add(l.dest_altn[0]);
+  });
+
+  _legAirports = legs.map((l, idx) => {
+    const depAp  = airports.find(a => a.icao === l.dep);
+    const destAp = airports.find(a => a.icao === l.dest);
+    return {
+      leg:  idx + 1,
+      dep:  { icao: l.dep,  iata: depAp  && depAp.iata },
+      dest: { icao: l.dest, iata: destAp && destAp.iata },
+    };
   });
 
   // Header: show all legs
