@@ -3,7 +3,7 @@
 Open problems, unproven claims, and accepted limitations. Close an entry by deleting it in
 the same commit that fixes it.
 
-Last reviewed: 2026-08-17, after fixing the element-wise BECMG fold (see #10).
+Last reviewed: 2026-08-22, closing #6 (fixture tree and docs now agree).
 
 | # | Issue | Severity |
 |---|---|---|
@@ -12,7 +12,6 @@ Last reviewed: 2026-08-17, after fixing the element-wise BECMG fold (see #10).
 | 3 | Manifest `start_url` lands on the upload form, not a briefing | high |
 | 4 | Offline briefing never verified on the target iPad | high |
 | 5 | Cached bundle goes stale after an `index.html` deploy | low |
-| 6 | Uncommitted fixture changes in `Input/`, and TG970 undocumented | housekeeping |
 | 7 | HIRA deliberately switched off | tracked, not a bug |
 | 8 | Accepted limitations (service workers on iOS Chrome; single cached briefing) | by design |
 | 9 | Manual tier overrides reach neither HIRA nor the bundle | by design |
@@ -140,24 +139,6 @@ Mostly self-correcting, since runs are swept at 24 h and Railway wipes the files
 every redeploy. Delete `runs/<run_id>/bundle.html` to force a rebuild. Worth a real fix
 only if bundles ever outlive a deploy — e.g. stamp the builder with a version and rebuild
 on mismatch.
-
----
-
-## #6 — Uncommitted fixture changes, and TG970 is undocumented
-
-**Status:** open · **Severity:** housekeeping
-
-The working tree has changes that have sat uncommitted across several sessions:
-
-- **Deleted, not committed:** `Input/NOTAM/TG201, TG415, TG673, TG677, TG934_NOTAM.pdf`.
-  `CLAUDE.md`'s Test Fixtures section still documents these as ad-hoc NOTAM parsing
-  fixtures. Either the deletion is intended (then commit it and update `CLAUDE.md`) or it
-  is accidental (then `git restore` them). Right now the docs and the tree disagree.
-- **Untracked:** `Input/TG970_{OFP,MET,NOTAM}.pdf` — the flight used for all offline
-  testing, and the only run in `runs/`. It is now a de-facto fixture but appears nowhere in
-  `CLAUDE.md`'s fixture table.
-- **Untracked:** `Input/IMG_1022.PNG` (1.2 MB) — unexplained; probably a screenshot that
-  does not belong in the repo.
 
 ---
 
