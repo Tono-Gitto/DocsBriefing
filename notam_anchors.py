@@ -8,6 +8,15 @@ but never modifies or imports from parse_notam_pdf()'s call path.
 
 Never raises on malformed content: an ID the walker can't cleanly bound is
 simply absent from the returned dict (see CONTEXT.md — "Anchor").
+
+A COM-INFO bulletin (see notam_engine._split_com_info_parts) gets its own
+precise per-sub-notice anchors ("<owner>|<id> [N]") in addition to the whole
+block's anchor, using the shared _partition_at_dash_boundaries boundary rule
+so its split lines up with general_notams.json's. If the two independent
+PDF-line extraction paths this module and notam_engine each use ever
+disagree for some NOTAM, the frontend's key-resolution fallback (index.html
+_resolveAnchorKey) degrades that mismatched part back to the whole-block box
+rather than leaving it unclickable.
 """
 
 import os
@@ -16,11 +25,13 @@ import pdfplumber
 
 from notam_engine import (
     _AP_HDR_RE,
+    _COM_INFO_TAG_RE,
     _FIR_HDR_RE,
     _GENERAL_SECTIONS,
     _MAIN_SECT_RE,
     _NOTAM_ID_RE,
     _PAGE_HDR_RE,
+    _partition_at_dash_boundaries,
 )
 
 _Y_PAD_FRAC = 0.005  # ~0.5% of page height, so the box doesn't kiss the glyphs
@@ -82,13 +93,29 @@ def extract_anchors(pdf_path):
 
     cur_key = None
     cur_lines = []
+    cur_is_ci = False
 
     def flush():
-        nonlocal cur_key, cur_lines
+        nonlocal cur_key, cur_lines, cur_is_ci
         if cur_key and cur_lines and cur_key not in anchors:  # first occurrence wins
-            anchors[cur_key] = _lines_to_rects(cur_lines, page_sizes)
+            anchors[cur_key] = _lines_to_rects([l[:5] for l in cur_lines], page_sizes)
+            # COM-INFO bulletins (GENERAL/FLIGHT LEG/AEROPLANE only, matching
+            # notam_engine._split_com_info_parts's own scope) bundle several
+            # sub-notices in one block; give each its own precise anchor
+            # ("<owner>|<id> [N]", matching general_notams.json's split id)
+            # instead of leaving every part pointing at the whole block.
+            # cur_lines[0] is the ID/header line itself — never part of a
+            # sub-notice's own box, so only cur_lines[1:] is partitioned.
+            if cur_is_ci and current_section in _GENERAL_SECTIONS and len(cur_lines) > 1:
+                groups = _partition_at_dash_boundaries(cur_lines[1:], text_of=lambda item: item[5])
+                if len(groups) > 1:
+                    for idx, group in enumerate(groups):
+                        part_key = f"{cur_key} [{idx + 1}]"
+                        if part_key not in anchors:
+                            anchors[part_key] = _lines_to_rects([l[:5] for l in group], page_sizes)
         cur_key = None
         cur_lines = []
+        cur_is_ci = False
 
     with pdfplumber.open(pdf_path) as pdf:
         for page_idx, page in enumerate(pdf.pages):
@@ -124,9 +151,10 @@ def extract_anchors(pdf_path):
                     flush()
                     owner = _owner_for(current_section, current_ap, current_fir)
                     cur_key = f"{owner}|{m_id.group(1).strip()}" if owner else None
+                    cur_is_ci = bool(_COM_INFO_TAG_RE.search(text))
 
                 if cur_key is not None:
-                    cur_lines.append((page_idx, line["x0"], line["x1"], line["top"], line["bottom"]))
+                    cur_lines.append((page_idx, line["x0"], line["x1"], line["top"], line["bottom"], text))
 
         flush()
 

@@ -111,6 +111,35 @@ def _split_com_info_parts(body_lines):
         parts.append(current)
     return parts if parts else [lines]
 
+
+def _partition_at_dash_boundaries(items, text_of):
+    """Group a non-empty sequence at lines matching _PART_BREAK_RE (items[1:]
+    only — the first item always seeds part 1, since a COM-INFO body's first
+    line is always part 1's content whether or not it also carries an inline
+    "--" prefix boundary; see _split_com_info_parts).
+
+    This is notam_anchors.py's geometry-aware counterpart to
+    _split_com_info_parts: same items (there, text lines; here, line-geometry
+    tuples), partitioned by the identical _PART_BREAK_RE regex, so the two
+    modules' part counts agree whenever their two independent PDF-line
+    extraction paths (clean_pdf_lines vs. page.extract_text_lines) agree on
+    the line text — verified line-for-line identical across every fixture
+    NOTAM PDF. Kept as a shared function (not hand-duplicated) so the two
+    boundary rules can't drift apart the way met_engine's BECMG fold used to
+    warn about.
+    """
+    items = list(items)
+    parts = []
+    current = [items[0]]
+    for item in items[1:]:
+        if _PART_BREAK_RE.match(text_of(item)):
+            parts.append(current)
+            current = [item]
+        else:
+            current.append(item)
+    parts.append(current)
+    return parts
+
 # Validity window line: *DD MMM YYYY HH:MM-DD MMM YYYY HH:MM*
 _WINDOW_RE = re.compile(
     r"^\*(\d{2}\s+[A-Z]{3}\s+\d{4}\s+\d{2}:\d{2})"

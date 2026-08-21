@@ -9,6 +9,7 @@ from notam_engine import (
     _is_active,
     _is_active_daily,
     _parse_daily_windows,
+    _partition_at_dash_boundaries,
     _parse_until,
     _split_com_info_parts,
 )
@@ -81,6 +82,50 @@ class TestSplitComInfoParts:
 
     def test_empty_body(self):
         assert _split_com_info_parts([]) == [[]]
+
+
+class TestPartitionAtDashBoundaries:
+    """notam_anchors.py's geometry-aware counterpart to _split_com_info_parts —
+    same boundary regex, applied to arbitrary (payload, text) items instead of
+    bare strings, via a text_of accessor."""
+
+    def test_first_item_always_seeds_part_one(self):
+        items = ["All A350 and BOEING 787:", "are now eligible for CPDLC."]
+        parts = _partition_at_dash_boundaries(items, text_of=lambda x: x)
+        assert parts == [items]
+
+    def test_splits_at_leading_double_dash(self):
+        items = [
+            "All A350 and BOEING 787:",
+            "are now eligible for CPDLC.",
+            "--IN CASE CANNOT BE CONTACTED BKKOC VIA TELEPHONE,",
+            "PILOTS MAY CONTACT VIA MS TEAMS.",
+        ]
+        parts = _partition_at_dash_boundaries(items, text_of=lambda x: x)
+        assert parts == [
+            ["All A350 and BOEING 787:", "are now eligible for CPDLC."],
+            ["--IN CASE CANNOT BE CONTACTED BKKOC VIA TELEPHONE,", "PILOTS MAY CONTACT VIA MS TEAMS."],
+        ]
+
+    def test_triple_dash_rule_line_is_not_a_boundary(self):
+        items = ["SUBJ: SPECIAL SECURITY ARRANGEMENT", "----------------------", "LEVEL: LOW"]
+        parts = _partition_at_dash_boundaries(items, text_of=lambda x: x)
+        assert parts == [items]
+
+    def test_works_on_non_string_payloads_via_text_of(self):
+        # Mirrors notam_anchors.py's real usage: items are geometry tuples,
+        # boundary detection reads the text field via text_of.
+        items = [
+            (1, 0.1, 0.9, 0.10, 0.12, "All A350 and BOEING 787:"),
+            (1, 0.1, 0.9, 0.13, 0.15, "--IN CASE CANNOT BE CONTACTED"),
+        ]
+        parts = _partition_at_dash_boundaries(items, text_of=lambda item: item[5])
+        assert len(parts) == 2
+        assert parts[0] == [items[0]]
+        assert parts[1] == [items[1]]
+
+    def test_single_item(self):
+        assert _partition_at_dash_boundaries(["only line"], text_of=lambda x: x) == [["only line"]]
 
 
 class TestDailyWindows:
