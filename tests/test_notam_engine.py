@@ -10,6 +10,7 @@ from notam_engine import (
     _is_active_daily,
     _parse_daily_windows,
     _parse_until,
+    _split_com_info_parts,
 )
 
 
@@ -38,6 +39,48 @@ class TestClassifyTier:
     ])
     def test_fir_tiers(self, body, expected):
         assert _classify_tier(body, is_fir=True) == expected
+
+
+class TestSplitComInfoParts:
+    def test_splits_on_double_dash_with_inline_first_part(self):
+        body = [
+            "COM INFO:--All A350 and BOEING 787:",
+            "are now eligible for CPDLC.",
+            "(ISSUED 23MAR26/BKKPC2/UFN)",
+            "--IN CASE CANNOT BE CONTACTED BKKOC VIA TELEPHONE,",
+            "PILOTS MAY CONTACT VIA MS TEAMS.",
+            "(ISSUED 30JUL24/BKKOC/UFN)",
+        ]
+        parts = _split_com_info_parts(body)
+        assert len(parts) == 2
+        assert parts[0][0] == "All A350 and BOEING 787:"
+        assert parts[1][0] == "IN CASE CANNOT BE CONTACTED BKKOC VIA TELEPHONE,"
+
+    def test_triple_dash_rule_line_is_not_a_separator(self):
+        body = [
+            "COM INFO:--WEF 01JUN26,",
+            "SUBJ: SPECIAL SECURITY ARRANGEMENT",
+            "----------------------",
+            "LEVEL: LOW CMA PERFORM SSA",
+            "--------------------------",
+            "MORE RULES",
+        ]
+        parts = _split_com_info_parts(body)
+        assert len(parts) == 1
+        assert "----------------------" in parts[0]
+
+    def test_no_com_info_prefix_returns_single_part(self):
+        body = ["COM INFO: Application of planning minima", "line two"]
+        assert _split_com_info_parts(body) == [body]
+
+    def test_zero_for_letter_o_prefix_variant(self):
+        body = ["COM INF0:--WEF 19JUN26,", "next line"]
+        parts = _split_com_info_parts(body)
+        assert len(parts) == 1
+        assert parts[0][0] == "WEF 19JUN26,"
+
+    def test_empty_body(self):
+        assert _split_com_info_parts([]) == [[]]
 
 
 class TestDailyWindows:

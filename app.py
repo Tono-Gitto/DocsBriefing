@@ -312,15 +312,22 @@ def _filter_general_notams(general_db, fir_db, leg_flight_infos):
     filter_system = (
         "You are a flight dispatcher reviewing NOTAMs for operational relevance. "
         f"Flight: {legs_summary}. Aircraft type: {acft}. FIRs on route: {fir_list}. "
-        "For each NOTAM below (separated by ---), decide if it could DIRECTLY affect the "
-        "operation of this flight — e.g. requires crew action, affects an airport/route/procedure "
-        "we use, or is a safety/security matter for this aircraft type. "
+        "Each NOTAM below is separated by the marker <<<NOTAM>>> on its own line — "
+        "NOTAM body text may itself contain dashes or other punctuation, so only that "
+        "exact marker line is a boundary. For each one, decide if it could DIRECTLY affect "
+        "the operation of this flight — e.g. requires crew action, affects an airport/route/"
+        "procedure we use, or is a safety/security matter for this aircraft type. "
         "Exclude administrative, planning, or airspace redesign items with no operational impact. "
+        "Copy the id value character-for-character from each NOTAM's 'ID:' line — do not "
+        "reformat, trim, or renumber it. "
         'Reply with a JSON array only, no other text: [{"id": "...", "relevant": true}, ...]'
     )
 
     client = anthropic.Anthropic()
     output_sections = []
+
+    def _norm_id(s):
+        return re.sub(r"\s+", " ", s.strip())
 
     for key, label in _GENERAL_SECTION_LABELS.items():
         all_notams = general_db.get(key, [])
@@ -334,14 +341,14 @@ def _filter_general_notams(general_db, fir_db, leg_flight_infos):
 
         for start in range(0, len(all_notams), 20):
             batch = all_notams[start: start + 20]
-            user_msg = "\n\n---\n\n".join(
+            user_msg = "\n\n<<<NOTAM>>>\n\n".join(
                 f'ID: {n["id"]}\n{n["body"]}' for n in batch
             )
             verdict_map = {}
             try:
                 msg = client.messages.create(
                     model=HAIKU_MODEL,
-                    max_tokens=1024,
+                    max_tokens=2048,
                     system=filter_system,
                     messages=[{"role": "user", "content": user_msg}],
                 )
@@ -349,15 +356,29 @@ def _filter_general_notams(general_db, fir_db, leg_flight_infos):
                 if raw_text.startswith("```"):  # tolerate fenced JSON
                     raw_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text)
                 verdicts = json.loads(raw_text)
-                verdict_map = {v["id"]: bool(v.get("relevant", True)) for v in verdicts if "id" in v}
+                verdict_map = {
+                    _norm_id(v["id"]): bool(v.get("relevant", True))
+                    for v in verdicts if "id" in v
+                }
             except Exception as e:
                 print(f"  WARN: general NOTAM filter failed ({e}); defaulting all to included")
 
             for n in batch:
-                if verdict_map.get(n["id"], True):  # default include on miss
-                    survivors.append(n)
-                else:
+                verdict = verdict_map.get(_norm_id(n["id"]))  # None = model didn't return this id
+                included = True if verdict is None else verdict
+                if not included:
                     excluded.append(n)
+                    continue
+                # A COM-INFO sub-notice (a split of a combined bulletin — see
+                # notam_engine._split_com_info_parts) that the AI explicitly judged
+                # relevant to this flight is promoted to T2 so it isn't lost among
+                # routine admin NOTAMs. Gated on an explicit True verdict (not the
+                # default-include-on-miss path) so one failed/truncated filter call
+                # can't silently promote a whole section. min() never downgrades an
+                # already-more-severe T1.
+                if verdict is True and n.get("com_info_part"):
+                    n["tier"] = min(n["tier"], 2)
+                survivors.append(n)
 
         summaries = notam_engine._summarize_notams({key: survivors}) if survivors else {}
 

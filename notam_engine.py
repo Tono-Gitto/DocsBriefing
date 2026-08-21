@@ -62,6 +62,55 @@ _NOTAM_ID_RE = re.compile(
     r"(.+?/\d{2,4})\s+\(\d{2}\s+[A-Z]{3}\s+\d{2}\)\s*$"
 )
 
+# Tag inside the ID-line prefix marking a COM-INFO bulletin ("(COM-INFO)"); a font
+# rendering quirk in some PDFs extracts the O as a zero ("COM-INF0"), so tolerate both.
+_COM_INFO_TAG_RE = re.compile(r"COM.INF[O0]", re.IGNORECASE)
+
+# A line starting a new sub-notice within a COM-INFO body: exactly "--" (not "---",
+# which is a visual rule line inside a notice, e.g. an SSA section's dashed dividers).
+_PART_BREAK_RE = re.compile(r"^--(?!-)\s*")
+
+# The same boundary, but found anywhere in a line rather than anchored at its start —
+# used only on body line 0, where the first notice starts inline right after a
+# "COM INFO:--" style prefix rather than at the line's beginning.
+_INLINE_BREAK_RE = re.compile(r"--(?!-)\s*")
+
+
+def _split_com_info_parts(body_lines):
+    """Split a COM-INFO bulletin body into its individually-dated sub-notices.
+
+    COM-INFO bulletins bundle several independent notices into one PDF block, e.g.
+    "COM INFO:--All A350...--IN CASE CANNOT...--To improve CTOT...". The first
+    notice starts inline after a "COM INFO:--" style prefix on line 0 — matched by
+    its first "--" boundary rather than the literal prefix text, since PDF text
+    extraction sometimes drops leading characters (e.g. "COM INFO:" → "OM INFO:").
+    Every later notice starts at a line beginning with exactly "--".
+
+    A body with no such boundary anywhere (not a bundled bulletin, despite the
+    ID-line tag) comes back as a single untouched part.
+    """
+    if not body_lines:
+        return [body_lines]
+    lines = list(body_lines)
+    m0 = _INLINE_BREAK_RE.search(lines[0])
+    if m0:
+        lines[0] = lines[0][m0.end():]
+
+    parts = []
+    current = [l for l in (lines[0],) if l]
+    for line in lines[1:]:
+        m2 = _PART_BREAK_RE.match(line)
+        if m2:
+            if current:
+                parts.append(current)
+            rest = line[m2.end():]
+            current = [rest] if rest else []
+        else:
+            current.append(line)
+    if current:
+        parts.append(current)
+    return parts if parts else [lines]
+
 # Validity window line: *DD MMM YYYY HH:MM-DD MMM YYYY HH:MM*
 _WINDOW_RE = re.compile(
     r"^\*(\d{2}\s+[A-Z]{3}\s+\d{4}\s+\d{2}:\d{2})"
@@ -401,33 +450,43 @@ def parse_notam_pdf(pdf_path):
     cur_win_s     = None
     cur_win_e     = None
     cur_see_attch = False
+    cur_is_ci     = False
 
     def flush():
-        nonlocal cur_id, cur_body, cur_win_s, cur_win_e, cur_see_attch
+        nonlocal cur_id, cur_body, cur_win_s, cur_win_e, cur_see_attch, cur_is_ci
         if cur_id and not cur_see_attch:
             body_lines = [l for l in cur_body if l]
             is_fir = current_section == "ENROUTE"
-            tier = _classify_tier(body_lines, is_fir=is_fir)
-            notam = {
-                "id":            cur_id,
-                "tier":          tier,
-                "body":          "\n".join(body_lines),
-                "win_start":     cur_win_s,
-                "win_end":       cur_win_e,
-                "daily_windows":  _parse_daily_windows(body_lines) if not is_fir else [],
-                "date_schedules": _parse_date_schedules(body_lines) if not is_fir else [],
-            }
-            if current_section == "ENROUTE" and current_fir:
-                fir_result[current_fir]["notams"].append(notam)
-            elif current_section in ("AERODROME", "ADDITIONAL") and current_ap:
-                result.setdefault(current_ap, []).append(notam)
-            elif current_section in _GENERAL_SECTIONS:
-                general_result[current_section].append(notam)
+            is_general = current_section in _GENERAL_SECTIONS
+            is_com_info = cur_is_ci and is_general
+            parts = _split_com_info_parts(body_lines) if is_com_info else [body_lines]
+            multi = len(parts) > 1
+            for idx, part_lines in enumerate(parts):
+                part_id = f"{cur_id} [{idx + 1}]" if multi else cur_id
+                tier = _classify_tier(part_lines, is_fir=is_fir)
+                notam = {
+                    "id":            part_id,
+                    "tier":          tier,
+                    "body":          "\n".join(part_lines),
+                    "win_start":     cur_win_s,
+                    "win_end":       cur_win_e,
+                    "daily_windows":  _parse_daily_windows(part_lines) if not is_fir else [],
+                    "date_schedules": _parse_date_schedules(part_lines) if not is_fir else [],
+                }
+                if is_com_info:
+                    notam["com_info_part"] = True
+                if current_section == "ENROUTE" and current_fir:
+                    fir_result[current_fir]["notams"].append(notam)
+                elif current_section in ("AERODROME", "ADDITIONAL") and current_ap:
+                    result.setdefault(current_ap, []).append(notam)
+                elif is_general:
+                    general_result[current_section].append(notam)
         cur_id        = None
         cur_body      = []
         cur_win_s     = None
         cur_win_e     = None
         cur_see_attch = False
+        cur_is_ci     = False
 
     expecting_window = False
 
@@ -476,7 +535,7 @@ def parse_notam_pdf(pdf_path):
         if m_id:
             flush()
             cur_id    = m_id.group(1).strip()
-            cur_is_ci = bool(re.search(r"COM.INFO", line, re.IGNORECASE))
+            cur_is_ci = bool(_COM_INFO_TAG_RE.search(line))
             expecting_window = True
             continue
 
