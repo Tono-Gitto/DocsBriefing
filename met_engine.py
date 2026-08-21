@@ -132,49 +132,149 @@ _GROUP_RE = re.compile(
 
 _WIND_RE = re.compile(r"^(VRB|\d{3})\d{2,3}(G\d{2,3})?(KT|MPS|KMH)$")
 _WIND_VAR_RE = re.compile(r"^\d{3}V\d{3}$")
+_CLOUD_RE = re.compile(r"^((FEW|SCT|BKN|OVC)\d{3}(CB|TCU)?|VV(\d{3}|///)|NSC|NCD|SKC|CLR)$")
+
+# Present-weather token = optional intensity/vicinity + descriptor(s)/phenomena.
+# Built from the lists so the membership is readable; NSW ("no significant
+# weather") is the explicit cancellation and belongs to the same element.
+_WX_DESC = ("MI", "BC", "PR", "DR", "BL", "SH", "TS", "FZ")
+_WX_PHEN = ("DZ", "RA", "SN", "SG", "IC", "PL", "GR", "GS", "UP",
+            "BR", "FG", "FU", "VA", "DU", "SA", "HZ", "PY", "PO", "SQ",
+            "FC", "SS", "DS")
+_WX_RE = re.compile(
+    r"^(NSW|[-+]?(VC)?(?:%s|%s)+)$" % ("|".join(_WX_DESC), "|".join(_WX_PHEN))
+)
+
+# Emission order of the merged baseline — the order a TAF states them in, so a
+# folded baseline reads like the TAF it came from. CAVOK occupies the
+# visibility slot (the two are mutually exclusive by construction below).
+_ELEMENTS = ("WIND", "VIS", "CAVOK", "WX", "CLOUD")
 
 
-def _leading_wind(s):
-    toks = s.split()
-    return toks[0] if toks and _WIND_RE.match(toks[0]) else None
+def _tok_category(tok):
+    """Which TAF element a token belongs to: WIND / VIS / CAVOK / WX / CLOUD,
+    or OTHER for anything that isn't a condition. Max/min-temperature groups
+    (TX23/1715Z, TN16/1804Z…) are stripped before tokens ever reach here (see
+    _TEMP_GROUP_RE / _strip_temp below) — OTHER is for any other non-condition
+    token that might still show up.
+
+    Order matters only in that CLOUD is tested before WX — nothing in _WX_RE
+    can match a cloud token, but keeping cloud first makes that independent of
+    the weather lists staying disjoint.
+    """
+    if _WIND_RE.match(tok) or _WIND_VAR_RE.match(tok):
+        return "WIND"
+    if tok == "CAVOK":
+        return "CAVOK"
+    if _VIS_TOKEN_RE.match(tok):
+        return "VIS"
+    if _CLOUD_RE.match(tok):
+        return "CLOUD"
+    if _WX_RE.match(tok):
+        return "WX"
+    return "OTHER"
 
 
-def _is_pure_wind_change(text):
-    """True if the group states only wind (plus an optional 250V310 variation)."""
-    toks = text.split()
-    if not toks or not _WIND_RE.match(toks[0]):
-        return False
-    return all(_WIND_VAR_RE.match(t) for t in toks[1:])
+# Max/min-temperature forecast groups (TX23/1715Z, TNM04/0412Z…) aren't a TAF
+# condition and aren't shown to the crew — dropped at parse time, before the
+# baseline/group text or token lists are built, so neither the string fold nor
+# the token fold ever carries one forward.
+_TEMP_GROUP_RE = re.compile(r"^(TX|TN)M?\d{2}/\d{4}Z$")
 
 
-def _fold_conditions(old, new):
+def _strip_temp(toks):
+    return [t for t in toks if not _TEMP_GROUP_RE.match(t["t"])]
+
+
+def _bucket(toks, text_of):
+    out = {c: [] for c in _ELEMENTS + ("OTHER",)}
+    for t in toks:
+        out[_tok_category(text_of(t))].append(t)
+    return out
+
+
+def _becmg_merge(old_toks, new_toks, text_of, to_vis):
+    """Element-wise BECMG fold, over an opaque token list.
+
+    This is the single implementation behind both _fold_conditions (tokens are
+    plain strings) and _fold_conditions_toks (tokens are {"t","s"} provenance
+    dicts) — text_of reads a token's text, to_vis rewrites one as a bare 9999.
+    Sharing the core is deliberate: CLAUDE.md requires the string and token
+    forms to stay in lockstep, and two hand-mirrored element-wise merges would
+    drift the first time either grew a category.
+
+    A BECMG states only the elements that are changing; everything it does not
+    mention persists from the preceding conditions (ICAO Annex 3). So the
+    result is the new group's elements plus, for each element it is silent on,
+    the old baseline's. CAVOK is the one cross-element token — it asserts
+    visibility, weather and cloud at once — so it survives only when the new
+    group restates none of the three, and otherwise degrades to the visibility
+    half it still implies (9999).
+    """
+    new_by_cat = _bucket(new_toks, text_of)
+    old_by_cat = _bucket(old_toks, text_of)
+    stated = {c for c in _ELEMENTS if new_by_cat[c]}
+
+    # A group that states visibility twice isn't one group — it's two states
+    # run together, which happens when _GROUP_RE misses a malformed separator
+    # (the fixtures have two: "FM 180500" in TG970 UPDATE's OPKC and
+    # "FM 271600" in TG934's OPLA, both space-split so FM\d{6} never matches).
+    # Merging by element would interleave the two states into "4000 4000 HZ HZ
+    # SCT020 BKN030 SCT020 BKN030"; there is no honest way to element-merge a
+    # group whose parse is this untrustworthy, so fall back to replacing
+    # wholesale — which keeps the run-together text in its original, readable
+    # order and leaves the tier to _tier_for_text as before.
+    if len(new_by_cat["VIS"]) + len(new_by_cat["CAVOK"]) > 1:
+        return list(new_toks)
+
+    out = dict(new_by_cat)
+    # CAVOK in the new group subsumes vis/weather/cloud; only wind can carry.
+    carried = ("WIND",) if "CAVOK" in stated else ("WIND", "VIS", "WX", "CLOUD")
+    for c in carried:
+        if c not in stated:
+            out[c] = list(old_by_cat[c])
+
+    if old_by_cat["CAVOK"] and "CAVOK" not in stated:
+        if not (stated & {"VIS", "WX", "CLOUD"}):
+            out["CAVOK"] = list(old_by_cat["CAVOK"])
+        elif "VIS" not in stated:
+            out["VIS"] = [to_vis(t) for t in old_by_cat["CAVOK"]]
+
+    out["OTHER"] = list(old_by_cat["OTHER"]) + list(new_by_cat["OTHER"])
+    return [t for c in _ELEMENTS + ("OTHER",) for t in out[c]]
+
+
+def _fold_conditions(old, new, becmg=True):
     """Fold a completed/in-progress BECMG or FM group onto the running baseline.
 
-    A wind-only change keeps old's non-wind elements (visibility/weather/cloud,
-    including CAVOK) and swaps in the new wind; any group that also states
-    visibility/weather/cloud fully replaces the baseline (TAF convention).
+    BECMG merges element-wise (see _becmg_merge). FM replaces the baseline
+    wholesale, because an FM group is by definition a complete restatement of
+    the conditions from that time onward — all 5 FM groups across the fixture
+    MET PDFs state wind and visibility, consistent with that reading.
     """
-    if not _is_pure_wind_change(new):
+    if not becmg:
         return new
-    old_wind = _leading_wind(old)
-    if old_wind is None:
-        return new
-    old_rest = old[len(old_wind):].strip()
-    return f"{new} {old_rest}".strip() if old_rest else new
+    return " ".join(
+        _becmg_merge(old.split(), new.split(), lambda t: t, lambda t: "9999")
+    )
 
 
-def _fold_conditions_toks(old_toks, old_text, new_toks, new_text):
-    """Token-level mirror of _fold_conditions — same three branches, driven by
-    the same _is_pure_wind_change/_leading_wind checks on the text form, so the
-    two stay in lockstep by construction (see CLAUDE.md gotcha on
-    taf_base_src). Tests assert " ".join(t) over the result equals
-    _fold_conditions(old_text, new_text) rather than trusting this in isolation.
+def _fold_conditions_toks(old_toks, new_toks, becmg=True):
+    """Token-level counterpart of _fold_conditions, sharing its merge core so
+    the two cannot drift (see CLAUDE.md gotcha on taf_base_src). Tests assert
+    " ".join of the result equals _fold_conditions on the same inputs.
+
+    A CAVOK degraded to 9999 keeps the CAVOK token's own source offset, so the
+    Source Pane's exact [s, s+len) span lookup misses and simply draws no fill
+    for it — the documented graceful-miss behaviour, never a misplaced box.
     """
-    if not _is_pure_wind_change(new_text):
+    if not becmg:
         return list(new_toks)
-    if _leading_wind(old_text) is None:
-        return list(new_toks)
-    return list(new_toks) + list(old_toks[1:])
+    return _becmg_merge(
+        old_toks, new_toks,
+        lambda t: t["t"],
+        lambda t: {"t": "9999", "s": t["s"]},
+    )
 
 
 def _resolve_ddhh(dd, hh, mm, anchor_dt):
@@ -219,8 +319,8 @@ def _parse_groups(taf_raw, ref_dt):
     base_raw = taf_raw[:base_end]
     hm = _FT_HEADER_RE.match(base_raw)
     header_end = hm.end() if hm else 0
-    base_text = base_raw[header_end:].strip()
-    base_toks = _tokenize(base_raw[header_end:], header_end)
+    base_toks = _strip_temp(_tokenize(base_raw[header_end:], header_end))
+    base_text = " ".join(t["t"] for t in base_toks)
 
     if not matches:
         return base_text, base_toks, []
@@ -230,8 +330,8 @@ def _parse_groups(taf_raw, ref_dt):
         gtype  = gm.group(1)
         window = gm.group(2)
         text_end = matches[i + 1].start() if i + 1 < len(matches) else len(taf_raw)
-        gtext = taf_raw[gm.end(): text_end].strip()
-        gtoks = _tokenize(taf_raw[gm.end(): text_end], gm.end())
+        gtoks = _strip_temp(_tokenize(taf_raw[gm.end(): text_end], gm.end()))
+        gtext = " ".join(t["t"] for t in gtoks)
 
         if gtype.startswith("FM"):
             # FM DDHHMM — time encoded in type token, no end
@@ -299,13 +399,13 @@ def condense_taf(taf_raw, ref_dt):
         if t == "BECMG" or t.startswith("FM"):
             if g["end"] is None:              # FM: complete once past start
                 if ref_dt >= s:
-                    baseline_toks = _fold_conditions_toks(baseline_toks, baseline, g["toks"], g["text"])
-                    baseline = _fold_conditions(baseline, g["text"])
+                    baseline_toks = _fold_conditions_toks(baseline_toks, g["toks"], becmg=False)
+                    baseline = _fold_conditions(baseline, g["text"], becmg=False)
                 elif s < win_end:             # FM starts within +1h → overlay
                     overlays.append(g)
             else:
                 if ref_dt >= g["end"]:
-                    baseline_toks = _fold_conditions_toks(baseline_toks, baseline, g["toks"], g["text"])
+                    baseline_toks = _fold_conditions_toks(baseline_toks, g["toks"])
                     baseline = _fold_conditions(baseline, g["text"])  # fold
                 elif s <= ref_dt < g["end"]:
                     becmg_prog = g            # in progress right now

@@ -3,7 +3,7 @@
 Open problems, unproven claims, and accepted limitations. Close an entry by deleting it in
 the same commit that fixes it.
 
-Last reviewed: 2026-08-17, after adding manual tier overrides (ADR 0004).
+Last reviewed: 2026-08-17, after fixing the element-wise BECMG fold (see #10).
 
 | # | Issue | Severity |
 |---|---|---|
@@ -16,6 +16,7 @@ Last reviewed: 2026-08-17, after adding manual tier overrides (ADR 0004).
 | 7 | HIRA deliberately switched off | tracked, not a bug |
 | 8 | Accepted limitations (service workers on iOS Chrome; single cached briefing) | by design |
 | 9 | Manual tier overrides reach neither HIRA nor the bundle | by design |
+| 10 | `_GROUP_RE` misses a space-split `FM DDHHMM`, running two TAF states together | low |
 
 ---
 
@@ -215,3 +216,33 @@ therefore keep showing the engine's own tiers:
 
 Also by design: overrides are **not** carried into the next run (a NOTAM's meaning depends on
 the flight), and two tabs on one run converge on reload rather than live.
+
+---
+
+## #10 — `_GROUP_RE` misses a space-split `FM DDHHMM`, running two TAF states together
+
+**Status:** open · Found while fixing the element-wise BECMG fold; deliberately not fixed
+in the same pass.
+
+`met_engine._GROUP_RE` matches an FM group as `FM\d{6}` with no separator. Two fixture TAFs
+have a space in the extracted text — `FM 180500` (TG970 UPDATE, OPKC) and `FM 271600`
+(TG934, OPLA) — so the group is never recognised and its conditions are absorbed into the
+*preceding* group's text, leaving one "group" that states two full states:
+
+```
+BECMG 1720/1722 26008G18KT 4000 HZ SCT020 BKN030 FM 180500 25010G25KT 4000 HZ SCT020 BKN030
+```
+
+**Impact is display-only and currently contained.** Both affected airports are enroute
+contingency airports — never a departure, destination or alternate — and neither changes
+`wx_tier`, because the duplicated visibility is identical in both states. `_becmg_merge`
+detects the double visibility and falls back to wholesale replacement, so the text renders
+in its original readable order rather than interleaved by element (see the CLAUDE.md gotcha).
+
+**Why it wasn't fixed here:** widening the regex to `FM\s*\d{6}` shifts every subsequent
+group's `src_start`, which is what `met_anchors.py` keys its ETA-window rectangles on — a
+Source Pane change that deserves its own verification pass against the fixture anchors, not
+a ride-along on a tier fix.
+
+**To close:** widen the regex, then re-run `tests/test_integration.py::TestMetAnchors` and
+confirm the 49/49 fidelity-gate result and VECC's page-crossing block still hold.
