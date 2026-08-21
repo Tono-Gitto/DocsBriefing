@@ -1550,6 +1550,22 @@ function tierBadgeClass(tier) {
   return tier === 1 ? "badge-t1" : tier === 2 ? "badge-t2" : "badge-t3";
 }
 
+// A COM-INFO bulletin split into several general_notams.json parts (see
+// notam_engine._split_com_info_parts) shares ONE notam_anchors.json entry —
+// the physical PDF block isn't split, only the summarized record is — so each
+// part's synthetic "<id> [N]" key misses the exact anchors lookup. Strip the
+// suffix and retry before giving up, so every part still resolves to the one
+// shared block highlight. Returns the key to actually use, or null on a true
+// miss (unrelated to splitting — the graceful-miss path everywhere else).
+function _resolveAnchorKey(doc, key) {
+  const anchors = _srcPane.docs[doc].anchors;
+  if (!anchors || !key) return null;
+  if (anchors[key]) return key;
+  const stripped = key.replace(/ \[\d+\]$/, '');
+  if (stripped !== key && anchors[stripped]) return stripped;
+  return null;
+}
+
 function notamRow(n, legInfo, anchorKey) {
   const unified  = Array.isArray(legInfo);
   // A manually overridden tier keeps its tier color — the severity semaphore
@@ -1566,8 +1582,8 @@ function notamRow(n, legInfo, anchorKey) {
     ? legInfo.map(num => `<span class="leg-chip${num === 2 ? ' leg2' : ''}">L${num}</span>`).join('')
     : '';
   const shown  = n.summary || n.body;
-  const hasAnchor = !!(anchorKey && _srcPane.docs.notam.anchors && _srcPane.docs.notam.anchors[anchorKey]);
-  const anchorAttr = hasAnchor ? ` data-anchor-key="${esc(anchorKey)}"` : '';
+  const resolvedAnchorKey = anchorKey ? _resolveAnchorKey('notam', anchorKey) : null;
+  const anchorAttr = resolvedAnchorKey ? ` data-anchor-key="${esc(resolvedAnchorKey)}"` : '';
   // data-tier-key is emitted independently of data-anchor-key: anchors are
   // best-effort and absent wholesale on legacy/demo runs, so hanging the
   // gesture off them would make rows non-cyclable exactly where they failed.
