@@ -3,7 +3,7 @@
 Open problems, unproven claims, and accepted limitations. Close an entry by deleting it in
 the same commit that fixes it.
 
-Last reviewed: 2026-08-22, closing #6 (fixture tree and docs now agree).
+Last reviewed: 2026-08-26, adding #11 and #12 (docs/adr/0005, alternate/ERA planning minima).
 
 | # | Issue | Severity |
 |---|---|---|
@@ -16,6 +16,8 @@ Last reviewed: 2026-08-22, closing #6 (fixture tree and docs now agree).
 | 8 | Accepted limitations (service workers on iOS Chrome; single cached briefing) | by design |
 | 9 | Manual tier overrides reach neither HIRA nor the bundle | by design |
 | 10 | `_GROUP_RE` misses a space-split `FM DDHHMM`, running two TAF states together | low |
+| 11 | `data/aerodrome_minima.json` is wiped on every Railway redeploy — unlike tiles/fir_coords, not re-derivable | accepted |
+| 12 | `era` extraction can't distinguish Fuel ERA from a future EDTO ERA in the same field | low |
 
 ---
 
@@ -227,3 +229,43 @@ a ride-along on a tier fix.
 
 **To close:** widen the regex, then re-run `tests/test_integration.py::TestMetAnchors` and
 confirm the 49/49 fidelity-gate result and VECC's page-crossing block still hold.
+
+---
+
+## #11 — The aerodrome-minima store is wiped on every Railway redeploy
+
+**Status:** accepted, not engineered around · See `docs/adr/0005`.
+
+`data/aerodrome_minima.json` (hand-entered Table 3 rows + base minima, docs/adr/0005) lives
+in `data/`, the same directory `data/tiles/` and `data/fir_coords_learned.json` already sit
+in — and that directory does not survive a Railway redeploy (the whole container filesystem
+resets from git). Tiles and learned FIR centroids degrade gracefully because they are
+re-derivable; hand-entered minima are not — a redeploy silently erases everything a
+dispatcher typed in.
+
+Accepted rather than fixed: a Railway persistent Volume is real infrastructure outside a
+coding session's reach, and committing the store to git would fight the "edit inline, save
+instantly" flow the feature is built around. Already-completed runs are unaffected — each
+keeps its own `minima_snapshot.json` inside `runs/`, independent of the live store — only a
+*new* upload made after a redeploy starts against an empty store and needs its alternates
+re-entered.
+
+---
+
+## #12 — `era` extraction can't distinguish Fuel ERA from a future EDTO ERA
+
+**Status:** open, low — no known trigger in any current fixture · See `docs/adr/0005` §1.
+
+`app.py`'s `_extract_alternates` populates `era` from `ERA/XXXX` and `FUEL ERA (XXXX)`
+patterns — both are the fuel-scheme concept (§8.1.7.5.5's 3%-contingency mechanism), not an
+EDTO diversion alternate (§8.5.6.7/§8.5.6.8), confirmed against the TG934 fixture's own text
+(`"CF 3% ERA/LTFM"`, `"FUEL ERA (LTFM) FUEL TIME DISPATCH LOAD"`). The alternate/ERA
+Planning Minima feature (docs/adr/0005) relies on this: it applies §8.1.6's first table row
+(Destination/Takeoff Alt/Dest Alt/Fuel ERA) to every `era` airport, not the table's separate,
+more permissive EDTO ERA row.
+
+If a future OFP format ever puts an EDTO diversion alternate into this same field, the wrong
+row would silently apply — in the false-PASS direction, since the EDTO row treats a
+transient-phenomenon TEMPO deterioration as applicable where the fuel-ERA row disregards it.
+Nothing currently triggers this; recorded so it isn't rediscovered as a fresh bug the first
+time it does.

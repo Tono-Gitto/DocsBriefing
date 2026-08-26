@@ -19,6 +19,12 @@ data/flight_info.json
 data/route.json
 data/fir_coords_learned.json
 
+# Alternate/ERA planning-minima store (docs/adr/0005) — hand-entered, not
+# regenerable. Deliberately NOT committed: keeping it out of git is what
+# makes the accepted redeploy-loss decision (KNOWN_ISSUES #11) actually true
+# rather than silently false the first time someone runs `git add -A`.
+data/aerodrome_minima.json
+
 # Python cache
 __pycache__/
 *.pyc

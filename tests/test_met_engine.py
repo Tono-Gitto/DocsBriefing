@@ -13,6 +13,7 @@ from met_engine import (
     _classify_wx_tier,
     _tier_for_text,
     _strip_temp,
+    _resolve_planning_minima,
 )
 
 
@@ -608,3 +609,143 @@ class TestTokenProvenance:
         for taf, ref in cases:
             base, _, _, toks = condense_taf(taf, ref)
             assert _joined(toks) == base, f"mismatch for {taf!r} @ {ref}"
+
+
+class TestPlanningMinima:
+    """OM-A §8.1.6 applicability filter (docs/adr/0005) — distinct from
+    wx_tier: this is a worst-case min() over baseline/BECMG/overlay
+    candidates, with transient/shower TEMPO-or-bare-PROB and any combined
+    PROB+TEMPO excluded from the pool outright."""
+
+    def test_baseline_only_no_overlays(self):
+        minima = _resolve_planning_minima("24008KT 9999 SCT020", None, [])
+        assert minima["applicable_ceiling_ft"] is None   # SCT never a ceiling; unrestricted
+        assert minima["ceiling_indeterminate"] is False
+        assert minima["ceiling_source"] == "baseline"
+        assert minima["applicable_vis_m"] == 9999
+        assert minima["vis_source"] == "baseline"
+        assert minima["disregarded"] == []
+
+    def test_becmg_in_progress_deteriorating_wins_the_min(self):
+        base = "24008KT 9999 SCT020"
+        becmg = {"text": "24008KT 3000 BKN005", "window": "10/1000Z-10/1200Z"}
+        minima = _resolve_planning_minima(base, becmg, [])
+        assert minima["applicable_ceiling_ft"] == 500
+        assert minima["ceiling_source"] == "BECMG target (10/1000Z-10/1200Z)"
+        assert minima["applicable_vis_m"] == 3000
+        assert minima["vis_source"] == "BECMG target (10/1000Z-10/1200Z)"
+
+    def test_becmg_in_progress_improving_is_not_credited(self):
+        # An improving BECMG target can never win a worst-case min() against
+        # a worse baseline — this is how "improvement disregarded until the
+        # change completes" falls out with no separate directional test.
+        base = "20015KT 3000 BKN008"
+        becmg = {"text": "20015KT 9999 BKN020", "window": "10/1000Z-10/1200Z"}
+        minima = _resolve_planning_minima(base, becmg, [])
+        assert minima["applicable_ceiling_ft"] == 800
+        assert minima["ceiling_source"] == "baseline"
+        assert minima["applicable_vis_m"] == 3000
+        assert minima["vis_source"] == "baseline"
+
+    def test_transient_shower_tempo_excluded_even_when_strictly_worse(self):
+        # Constructed strictly worse than baseline so the assertion is
+        # meaningful: under min(), a same-or-better excluded overlay would
+        # pass this test whether or not the exclusion is actually coded.
+        base = "24008KT 9999 SCT020"
+        overlays = [{"type": "TEMPO", "text": "1500 TSRA BKN005", "window": "10/1015Z-10/1030Z"}]
+        minima = _resolve_planning_minima(base, None, overlays)
+        assert minima["applicable_ceiling_ft"] is None
+        assert minima["ceiling_source"] == "baseline"
+        assert minima["applicable_vis_m"] == 9999
+        assert minima["vis_source"] == "baseline"
+        assert minima["disregarded"] == [
+            {"type": "TEMPO", "window": "10/1015Z-10/1030Z", "reason": "transient/shower phenomenon"}
+        ]
+
+    def test_persistent_phenomenon_tempo_applies(self):
+        base = "24008KT 9999 SCT020"
+        overlays = [{"type": "TEMPO", "text": "1500 FG BKN005", "window": "10/1015Z-10/1030Z"}]
+        minima = _resolve_planning_minima(base, None, overlays)
+        assert minima["applicable_ceiling_ft"] == 500
+        assert minima["ceiling_source"] == "TEMPO (10/1015Z-10/1030Z)"
+        assert minima["applicable_vis_m"] == 1500
+        assert minima["vis_source"] == "TEMPO (10/1015Z-10/1030Z)"
+        assert minima["disregarded"] == []
+
+    def test_combined_prob_tempo_excluded_regardless_of_phenomenon(self):
+        # OM-A §8.1.6 permits disregarding PROB30/40 TEMPO in both
+        # directions; the tool exercises that permission by design (ADR 0005
+        # §5), even for a phenomenon that would otherwise count as persistent.
+        base = "24008KT 9999 SCT020"
+        overlays = [{"type": "PROB30 TEMPO", "text": "1500 FG BKN005", "window": "10/1015Z-10/1030Z"}]
+        minima = _resolve_planning_minima(base, None, overlays)
+        assert minima["applicable_ceiling_ft"] is None
+        assert minima["applicable_vis_m"] == 9999
+        assert minima["disregarded"] == [
+            {"type": "PROB30 TEMPO", "window": "10/1015Z-10/1030Z",
+             "reason": "PROB+TEMPO combined — OM-A §8.1.6 permits disregarding"}
+        ]
+
+    def test_improvement_only_overlay_is_an_emergent_noop(self):
+        # Not a coded branch — an improving TEMPO simply never wins the
+        # min() against a worse baseline. Guards against a future regression
+        # rather than proving a specific `if`.
+        base = "20015KT 3000 BKN008"
+        overlays = [{"type": "TEMPO", "text": "9999 BKN020", "window": "10/1015Z-10/1030Z"}]
+        minima = _resolve_planning_minima(base, None, overlays)
+        assert minima["applicable_ceiling_ft"] == 800
+        assert minima["ceiling_source"] == "baseline"
+        assert minima["applicable_vis_m"] == 3000
+        assert minima["vis_source"] == "baseline"
+        assert minima["disregarded"] == []
+
+    def test_ceiling_not_indeterminate_when_only_few_or_sct_present(self):
+        # The false positive this rule must avoid: VTBS's validated baseline
+        # shape has no BKN/OVC/VV, but SCT020 is an affirmative statement
+        # that no ceiling exists — not silence. Must resolve as unrestricted,
+        # never "cannot determine".
+        minima = _resolve_planning_minima("24008KT 9999 SCT020", None, [])
+        assert minima["ceiling_indeterminate"] is False
+        assert minima["applicable_ceiling_ft"] is None
+
+    def test_ceiling_indeterminate_when_baseline_states_no_cloud_at_all(self):
+        minima = _resolve_planning_minima("24008KT 9999", None, [])
+        assert minima["ceiling_indeterminate"] is True
+        assert minima["applicable_ceiling_ft"] is None
+        assert minima["vis_indeterminate"] is False   # independent of ceiling
+
+    def test_vis_indeterminate_when_baseline_states_no_vis_at_all(self):
+        minima = _resolve_planning_minima("24008KT SCT020", None, [])
+        assert minima["vis_indeterminate"] is True
+        assert minima["applicable_vis_m"] is None
+        assert minima["ceiling_indeterminate"] is False   # independent of vis
+
+    def test_no_taf_at_all_is_indeterminate_not_a_pass(self):
+        minima = _resolve_planning_minima(None, None, [])
+        assert minima["ceiling_indeterminate"] is True
+        assert minima["vis_indeterminate"] is True
+        assert minima["applicable_ceiling_ft"] is None
+        assert minima["applicable_vis_m"] is None
+        assert minima["disregarded"] == []
+
+    def test_real_combined_prob_tempo_overlays_from_condense_taf_are_disregarded(self):
+        # Closes the gap the synthetic tests above can't: pins that
+        # condense_taf's actual overlay["type"] strings ("PROB40 TEMPO",
+        # "PROB30 TEMPO") match this function's exclusion tuples, not just
+        # a hand-written assumption about _GROUP_RE's capture groups. Same
+        # LSZH fixture TAF as TestPartialBecmgRegression, at a ref time
+        # (day 17, 1714Z) where both PROB+TEMPO groups are live.
+        taf = ("FT 171327Z 1713/1818 24006KT 9999 FEW015 SCT040TCU "
+               "TX23/1715Z TN16/1804Z TX27/1814Z "
+               "TEMPO 1713/1716 SCT020 PROB40 TEMPO 1713/1719 SHRA "
+               "PROB30 TEMPO 1714/1719 26010KT TSRA SCT040CB "
+               "BECMG 1719/1721 FEW030 TEMPO 1800/1809 CAVOK "
+               "BECMG 1809/1811 28012KT")
+        base, becmg, overlays, _ = condense_taf(taf, _dt(2026, 8, 17, 17, 14))
+        assert [ov["type"] for ov in overlays] == ["PROB40 TEMPO", "PROB30 TEMPO"]
+        minima = _resolve_planning_minima(base, becmg, overlays)
+        assert [d["type"] for d in minima["disregarded"]] == ["PROB40 TEMPO", "PROB30 TEMPO"]
+        # Baseline holds — the excluded PROB30 TEMPO's TSRA/low-vis-shaped
+        # restatement never reaches applicable_ceiling_ft/applicable_vis_m.
+        assert minima["applicable_ceiling_ft"] is None   # FEW015/SCT040TCU: unrestricted
+        assert minima["applicable_vis_m"] == 9999

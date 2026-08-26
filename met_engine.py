@@ -577,6 +577,134 @@ def _classify_wx_tier(taf_base, becmg_in_progress, active_overlays):
     return tier
 
 
+# ── Planning minima (OM-A §8.1.7.5.2 Table 3 / §8.1.6) ───────────────────────
+# See docs/adr/0005-alternate-era-planning-minima.md. This is a different rule
+# from wx_tier above — a regulatory selectability filter, not a severity
+# semaphore — and the two are allowed to disagree (a transient-phenomenon
+# TEMPO can drive wx_tier to YELLOW while being disregarded here). Reads
+# condense_taf's/​_classify_wx_tier's existing outputs only; neither is modified.
+
+# Transient/shower phenomena (§8.1.6): "short-lived weather phenomena, e.g.
+# thunderstorms, showers." A different partition from _WX_PHENOMENA_RE, which
+# floors ALL of these — plus the persistent ones below — to a YELLOW wx_tier
+# floor; that grouping does not apply here.
+_TRANSIENT_WX_RE = re.compile(r"\b(TS\w*|SH\w*)\b")
+# Persistent phenomena (§8.1.6): "e.g. haze, mist, fog, dust/sandstorm,
+# continuous precipitation" — named examples, not exhaustive. An unlisted
+# phenomenon, or no phenomenon token at all, defaults to persistent (i.e. the
+# overlay is not excluded) — the conservative, false-PASS-avoiding direction.
+_PERSISTENT_WX_RE = re.compile(r"\b(HZ|BR|FG|FZFG|FZRA|FZDZ|DS|SS)\b")
+
+
+def _is_transient_only(text):
+    """True only when a transient/shower token is present and no persistent
+    token is — a mixed phrase (e.g. "TSRA BR") is treated as persistent, not
+    transient, per the conservative default above."""
+    return bool(_TRANSIENT_WX_RE.search(text)) and not _PERSISTENT_WX_RE.search(text)
+
+
+def _planning_candidate(text):
+    """Extract one condition string's ceiling/vis for the minima pool.
+
+    cloud_stated distinguishes "no ceiling" (FEW/SCT/NSC/etc. present, so the
+    element was addressed and there simply isn't a ceiling) from "silent on
+    cloud entirely" (no cloud token of any kind, not even a scattered/few
+    layer) — the latter is what makes a baseline indeterminate, not the
+    former. Conflating the two would flag most GREEN airports (e.g. VTBS's
+    validated `24008KT 9999 SCT020`, which has no BKN/OVC/VV but is not
+    silent) as indeterminate.
+    """
+    toks = text.split()
+    has_cavok = "CAVOK" in toks or "NSC" in toks
+    vis_m, ceiling_ft = _vis_and_ceiling(toks)
+    return {
+        "vis_m": vis_m,               # None = CAVOK/unrestricted, or absent
+        "ceiling_ft": ceiling_ft,     # None = CAVOK/FEW/SCT/unrestricted, or absent
+        "has_vis_token": vis_m is not None or has_cavok,
+        "cloud_stated": has_cavok or any(_CLOUD_RE.match(t) for t in toks),
+    }
+
+
+def _worst(pool):
+    """(value, source) with the lowest (worst) numeric value in pool, a list
+    of (value_or_None, source_label) pairs. None (unrestricted) never wins
+    against a stated numeric value. If nothing in the pool is numeric, the
+    result is unrestricted and attributed to the baseline — the state that
+    holds unless something in the pool narrows it."""
+    numeric = [(v, s) for v, s in pool if v is not None]
+    if not numeric:
+        return None, "baseline"
+    return min(numeric, key=lambda pair: pair[0])
+
+
+def _resolve_planning_minima(taf_base, becmg_in_progress, active_overlays):
+    """OM-A §8.1.6 applicability filter for the alternate/ERA planning-minima
+    check (docs/adr/0005 §5). Returns the worst-case (lowest) ceiling/vis a
+    dispatcher may rely on across every §8.1.6-applicable source, plus which
+    source produced it and a transparency list of every overlay excluded.
+
+    The mechanism is a worst-case min() over a candidate pool: baseline
+    always enters; becmg_in_progress's folded target and any upcoming
+    BECMG/FM overlay always enter unconditionally, because an improvement
+    can never win a min() against a worse baseline anyway — so "always
+    include, let min() decide" reproduces §8.1.6's deterioration-applies /
+    improvement-disregarded rule with no separate directional test. Only
+    bare TEMPO/PROB30/PROB40 with a transient/shower phenomenon, and any
+    combined PROB30/40 TEMPO, are excluded outright (they must never win the
+    min() even when numerically worst) — every exclusion is recorded in
+    `disregarded`, unconditionally, whether or not it would have been
+    binding.
+
+    Returns a dict: applicable_ceiling_ft, applicable_vis_m (None if
+    indeterminate or unrestricted), ceiling_source, vis_source,
+    ceiling_indeterminate, vis_indeterminate, disregarded.
+    """
+    disregarded = []
+    base = _planning_candidate(taf_base) if taf_base else None
+
+    ceiling_indeterminate = base is None or not base["cloud_stated"]
+    vis_indeterminate = base is None or not base["has_vis_token"]
+
+    pool_ceiling = []
+    pool_vis = []
+    if base is not None:
+        pool_ceiling.append((base["ceiling_ft"], "baseline"))
+        pool_vis.append((base["vis_m"], "baseline"))
+
+    if becmg_in_progress:
+        c = _planning_candidate(becmg_in_progress["text"])
+        label = f"BECMG target ({becmg_in_progress['window']})"
+        pool_ceiling.append((c["ceiling_ft"], label))
+        pool_vis.append((c["vis_m"], label))
+
+    for ov in active_overlays:
+        label = f"{ov['type']} ({ov['window']})"
+        if ov["type"] in ("PROB30 TEMPO", "PROB40 TEMPO"):
+            disregarded.append({"type": ov["type"], "window": ov["window"],
+                                 "reason": "PROB+TEMPO combined — OM-A §8.1.6 permits disregarding"})
+            continue
+        if ov["type"] in ("TEMPO", "PROB30", "PROB40") and _is_transient_only(ov["text"]):
+            disregarded.append({"type": ov["type"], "window": ov["window"],
+                                 "reason": "transient/shower phenomenon"})
+            continue
+        c = _planning_candidate(ov["text"])
+        pool_ceiling.append((c["ceiling_ft"], label))
+        pool_vis.append((c["vis_m"], label))
+
+    applicable_ceiling_ft, ceiling_source = (None, None) if ceiling_indeterminate else _worst(pool_ceiling)
+    applicable_vis_m, vis_source = (None, None) if vis_indeterminate else _worst(pool_vis)
+
+    return {
+        "applicable_ceiling_ft": applicable_ceiling_ft,
+        "applicable_vis_m": applicable_vis_m,
+        "ceiling_source": ceiling_source,
+        "vis_source": vis_source,
+        "ceiling_indeterminate": ceiling_indeterminate,
+        "vis_indeterminate": vis_indeterminate,
+        "disregarded": disregarded,
+    }
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -605,6 +733,7 @@ def main():
         if d["taf_raw"]:
             taf_base, becmg_prog, active_overlays, taf_base_src = condense_taf(d["taf_raw"], ref_dt)
         wx_tier = _classify_wx_tier(taf_base, becmg_prog, active_overlays)
+        planning_minima = _resolve_planning_minima(taf_base, becmg_prog, active_overlays)
 
         out.append({
             "icao": icao,
@@ -623,6 +752,13 @@ def main():
             "becmg_in_progress": becmg_prog,
             "active_overlays": active_overlays,
             "wx_tier": wx_tier,
+            "applicable_ceiling_ft": planning_minima["applicable_ceiling_ft"],
+            "applicable_vis_m": planning_minima["applicable_vis_m"],
+            "ceiling_source": planning_minima["ceiling_source"],
+            "vis_source": planning_minima["vis_source"],
+            "ceiling_indeterminate": planning_minima["ceiling_indeterminate"],
+            "vis_indeterminate": planning_minima["vis_indeterminate"],
+            "disregarded": planning_minima["disregarded"],
         })
 
     os.makedirs(os.path.dirname(OUT_JSON), exist_ok=True)

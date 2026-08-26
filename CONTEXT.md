@@ -70,4 +70,27 @@ detail. See `CLAUDE.md` for architecture and `docs/adr/` for decisions.
 ## Weather
 
 - **Weather tier (GREEN/YELLOW/RED)** — severity of forecast conditions at an airport at
-  its reference time; drives map marker color.
+  its reference time; drives map marker color. Answers a different question from
+  **Planning Minima** below — a transient-phenomenon TEMPO can drive this to YELLOW while
+  the same overlay is correctly disregarded for Planning Minima, so a YELLOW marker next
+  to a minima PASS is expected, not a contradiction (docs/adr/0005).
+
+## Planning Minima
+
+- **Planning Minima** — the OM-A §8.1.7.5.2 Table 3 check for whether an alternate/ERA
+  aerodrome's forecast conditions, at a leg's ETA±1h, are at or above its published
+  landing minima plus Table 3's margin. A regulatory selectability test, not a severity
+  reading — see the Weather tier note above.
+- **Table 3 Row** — one of the six OM-A Table 3 rows (approach-type combination →
+  ceiling/RVR-VIS increment). Chosen by the person entering an aerodrome's minima, not
+  derived by the app — Table 3 itself treats row selection as an operator optimization.
+- **Base Minima** — an aerodrome's actual published DH/MDH (height above the aerodrome,
+  never DA/MDA) and RVR/VIS for the approach that justifies its chosen Table 3 Row.
+  Hand-entered per ICAO (this app has no path to Lido mPilot, the tool THAI's OM-A itself
+  names as the source) and stored server-side, keyed by ICAO — an aerodrome fact, not a
+  flight fact.
+- **Applicable Forecast** — the worst-case (lowest) ceiling/visibility a dispatcher may
+  rely on across baseline, BECMG target, and non-excluded TEMPO/PROB overlays, per
+  OM-A §8.1.6's TAF/TREND applicability table. A transient/shower TEMPO or a combined
+  PROB30/40 TEMPO is excluded outright rather than folded in, however severe its own
+  numbers — every exclusion is still shown to the dispatcher, never silently dropped.

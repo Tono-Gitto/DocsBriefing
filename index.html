@@ -297,6 +297,54 @@
       margin-bottom: 10px; font-size: 0.8rem; color: #8a7a55; font-style: italic;
     }
 
+    /* Alternate/ERA planning minima (docs/adr/0005). Deliberately not the
+       wx_tier color vocabulary (WX_COLORS) — this is a different, regulatory
+       question ("is this aerodrome selectable"), and a YELLOW-tagged
+       alternate correctly showing PASS here must never read as a color
+       clash with the marker's weather semaphore. */
+    .minima-verdict {
+      display: inline-block; font-size: 0.72rem; font-weight: 700;
+      letter-spacing: 0.06em; padding: 2px 8px; border-radius: 4px;
+      text-transform: uppercase; margin-left: 8px;
+    }
+    .minima-pass  { background: #0e2a1a; color: #4cff91; }
+    .minima-fail  { background: #3a1010; color: #ff8080; }
+    .minima-unknown { background: #2a2410; color: #d0b060; }
+    .minima-row { font-size: 0.9rem; color: #a8b8d0; line-height: 1.6; }
+    .minima-row .req { color: #667; }
+    .minima-source { font-size: 0.78rem; color: #667; margin-top: 2px; }
+    .minima-disregarded {
+      display: inline-block; margin-top: 8px;
+      padding: 3px 9px; border-radius: 10px;
+      background: #1a1a2e; border: 1px solid #33365a;
+      color: #8890b0; font-size: 0.78rem; cursor: pointer;
+    }
+    .minima-disregarded-list {
+      margin-top: 6px; font-size: 0.82rem; color: #8890b0; line-height: 1.6;
+    }
+    .minima-enter, .minima-edit {
+      color: #8ec8ff; cursor: pointer; text-decoration: underline;
+      font-size: 0.88rem;
+    }
+    .minima-form { margin-top: 8px; }
+    .minima-form label {
+      display: block; font-size: 0.78rem; color: #778; margin: 8px 0 3px;
+    }
+    .minima-form select, .minima-form input {
+      width: 100%; box-sizing: border-box; padding: 6px 8px;
+      background: #12142a; border: 1px solid #2a2d55; border-radius: 5px;
+      color: #c8d8f0; font-size: 0.9rem;
+    }
+    .minima-form-actions { margin-top: 10px; display: flex; gap: 8px; }
+    .minima-save {
+      padding: 6px 14px; border-radius: 5px; background: #1a3a5a;
+      color: #60b0ff; border: none; cursor: pointer; font-size: 0.85rem;
+    }
+    .minima-cancel {
+      padding: 6px 14px; border-radius: 5px; background: transparent;
+      color: #667; border: 1px solid #33365a; cursor: pointer; font-size: 0.85rem;
+    }
+
     .notam-row {
       padding: 11px 0;
       border-bottom: 1px solid #191c38;
@@ -740,6 +788,44 @@ const MANIFEST_URL = (RUN && !BUNDLE) ? `/data/${RUN}/manifest.json` : null;
 
 const ROUTE_COLORS = ["#5b9ef4", "#f4a15b"];  // leg 1 = blue, leg 2 = orange
 
+// ── Alternate/ERA planning minima (docs/adr/0005) ──────────────────────────
+// OM-A §8.1.7.5.2 Table 3 — the six planning-minima rows THAI's standard fuel
+// scheme uses (Table 1 is dead code for B777 ops, see the ADR). Base minima
+// (an aerodrome's actual published DH/MDH + RVR/VIS) can't be sourced from
+// this app — THAI's own OM-A §8.1.3.3 delegates that to the LIDO mPilot
+// app — so they're hand-entered per ICAO and stored server-side, keyed by
+// ICAO (an aerodrome fact, not a flight fact). ceiling_ft/rvr_vis_m below are
+// the row's *increment*, added to the entered base minima at render time.
+const MINIMA_TABLE3 = [
+  { row: 1, label: "≥2 usable Type B approaches, 2 separate runways", ceiling_ft: 100, rvr_vis_m: 300 },
+  { row: 2, label: "1 usable Type B approach",                         ceiling_ft: 150, rvr_vis_m: 450 },
+  { row: 3, label: "3D Type A approach (facility ≤200 ft system minimum)", ceiling_ft: 200, rvr_vis_m: 800 },
+  { row: 4, label: "≥2 usable Type A approaches, separate navaids",    ceiling_ft: 200, rvr_vis_m: 1000 },
+  { row: 5, label: "1 usable Type A approach",                          ceiling_ft: 400, rvr_vis_m: 1500 },
+  { row: 6, label: "Circling approach",                                 ceiling_ft: 400, rvr_vis_m: 1500 },
+];
+
+// ICAO -> {row, base_height_ft, base_rvr_vis_m, updated}. minima_snapshot.json
+// is this group's offline fallback (precached like any other briefing file —
+// aerodrome facts are safe to precache aggressively, unlike hira.json); a
+// live fetch of /api/minima overlays it when online so an edit made after
+// upload still helps this session. bundle.html has no server, so it only
+// ever sees the snapshot baked in at build time (read-only there — same
+// divergence class as tier overrides, ADR 0004 §8).
+let _minimaStore = {};
+
+function _loadMinimaStore() {
+  return fetch(DATA("minima_snapshot.json")).then(r => r.ok ? r.json() : {}).catch(() => ({}))
+    .then(snapshot => {
+      _minimaStore = snapshot || {};
+      if (BUNDLE) return;
+      return fetch("/api/minima").then(r => r.ok ? r.json() : null).then(live => {
+        if (live) _minimaStore = live;  // online: supersedes the snapshot wholesale
+      }).catch(() => {});  // offline (or no server): keep the snapshot
+    });
+}
+_loadMinimaStore();
+
 // ── Manual tier overrides (docs/adr/0004) ──────────────────────────────────
 // The crew can re-rate any NOTAM by tapping its tier badge. Overrides live in
 // localStorage, scoped to the run, and are applied ONCE at data-load time by
@@ -849,9 +935,14 @@ let _activeRwyFilter = null;
 let _navAirports = [];
 let _navFirs     = [];
 let _navIndex    = -1;
-// [{leg, dep:{icao,iata}, dest:{icao,iata}}, ...] — every leg's departure and
-// arrival, IATA resolved from airports.json. Populated once flight_info.json
-// and airports.json both load; used only by the SSA Source Pane fills below.
+// [{leg, dep:{icao,iata}, dest:{icao,iata}, dest_altn, era, rcf_altn}, ...] —
+// every leg's departure/arrival (IATA resolved from airports.json) plus its
+// full alternate/ERA/RCF-alternate ICAO lists (docs/adr/0005 §6 — the FULL
+// dest_altn array, not just dest_altn[0], unlike the map's pink role ring
+// which shows only the primary to avoid marker clutter; every listed
+// alternate is a real regulatory option and gets the Planning Minima check).
+// Populated once flight_info.json and airports.json both load; dep/dest/iata
+// feed the SSA Source Pane fills, the role arrays feed the minima block.
 let _legAirports = [];
 
 // ── Source Pane (original MET + NOTAM PDFs, click-to-highlight) ─────────────
@@ -1451,7 +1542,15 @@ function _tierToastHide() {
 }
 
 document.addEventListener('click', e => {
-  // FIRST branch, and it stops propagation: an anchored row's tap opens the
+  // FIRST branch of all: the Planning Minima block (docs/adr/0005 §6) is a
+  // .met-row (so Selection Sync can still target it), but its "Enter
+  // minima"/"Edit"/"Save"/"Cancel"/"Disregarded (N)" controls must claim
+  // their own tap before the metRow handler below opens the Source Pane
+  // underneath them — same reasoning as the tier-badge branch just after it.
+  const minimaAction = e.target.closest('[data-minima-action]');
+  if (minimaAction) { e.stopPropagation(); _handleMinimaAction(minimaAction); return; }
+
+  // Also first, and it stops propagation: an anchored row's tap opens the
   // Source Pane (ADR 0002), so the badge must claim its own tap before that
   // handler below sees it. The key travels in a data- attribute — NOTAM ids
   // come from third-party PDFs and are never interpolated into inline JS.
@@ -1653,6 +1752,163 @@ function compactWindow(w) {
   return `${from}–${to}`;
 }
 
+// ── Planning Minima block (docs/adr/0005) ────────────────────────────────────
+// Role gate: is ap.icao a dest_altn / era / rcf_altn on this specific leg?
+// Uses the FULL dest_altn array (not altnSet's primary-only [0]) — see the
+// _legAirports comment above.
+function _minimaRole(icao, legNum) {
+  const la = _legAirports[legNum - 1];
+  if (!la) return false;
+  return la.dest_altn.includes(icao) || la.era.includes(icao) || la.rcf_altn.includes(icao);
+}
+
+// value/indeterminate -> verdict string. Written as indeterminate-first,
+// then null (unrestricted), then numeric compare — never a truthiness test,
+// since 0 is a legitimate ceiling and would read as falsy.
+function _minimaVerdict(applicable, indeterminate, required) {
+  if (indeterminate) return "unknown";
+  if (applicable === null) return "pass";        // unrestricted (CAVOK/FEW/SCT, or CAVOK vis)
+  return applicable >= required ? "pass" : "fail";
+}
+const _MINIMA_VERDICT_LABEL = { pass: "PASS", fail: "FAIL", unknown: "CANNOT DETERMINE" };
+function _worseVerdict(a, b) {
+  const rank = { pass: 0, unknown: 1, fail: 2 };
+  return rank[a] >= rank[b] ? a : b;
+}
+
+function _minimaBlockHtml(ap, leg, metAttr) {
+  if (!_minimaRole(ap.icao, leg.leg)) return "";
+
+  const entry = _minimaStore[ap.icao];
+  const disregarded = leg.disregarded || [];
+  const disregardId = `minima-disr-${esc(ap.icao)}-${leg.leg}`;
+  const disregardedHtml = disregarded.length
+    ? `<span class="minima-disregarded" data-minima-action="toggle-disregarded" data-minima-target="${disregardId}">Disregarded (${disregarded.length}) · tap to review</span>
+       <div class="minima-disregarded-list" id="${disregardId}" hidden>
+         ${disregarded.map(d => `<div>${esc(d.type)} ${esc(d.window)} — ${esc(d.reason)}</div>`).join("")}
+       </div>`
+    : "";
+
+  if (!entry) {
+    return `<div class="panel-section met-row minima-block"${metAttr}>
+      <div class="panel-label">Planning Minima</div>
+      <div class="no-data">No entry for ${esc(ap.icao)} —
+        <span class="minima-enter" data-minima-action="enter" data-minima-icao="${esc(ap.icao)}">Enter minima</span>
+      </div>
+      ${disregardedHtml}
+    </div>`;
+  }
+
+  const row = MINIMA_TABLE3.find(r => r.row === entry.row) || MINIMA_TABLE3[0];
+  const reqCeiling = entry.base_height_ft + row.ceiling_ft;
+  const reqVis     = entry.base_rvr_vis_m + row.rvr_vis_m;
+  const ceilingVerdict = _minimaVerdict(leg.applicable_ceiling_ft, leg.ceiling_indeterminate, reqCeiling);
+  const visVerdict     = _minimaVerdict(leg.applicable_vis_m, leg.vis_indeterminate, reqVis);
+  const overall = _worseVerdict(ceilingVerdict, visVerdict);
+
+  const ceilingText = leg.ceiling_indeterminate ? "cannot determine"
+    : leg.applicable_ceiling_ft === null ? "unrestricted" : `${leg.applicable_ceiling_ft} ft`;
+  const visText = leg.vis_indeterminate ? "cannot determine"
+    : leg.applicable_vis_m === null ? "unrestricted" : `${leg.applicable_vis_m} m`;
+
+  return `<div class="panel-section met-row minima-block"${metAttr}>
+    <div class="panel-label">Planning Minima
+      <span class="minima-verdict minima-${overall}">${_MINIMA_VERDICT_LABEL[overall]}</span>
+    </div>
+    <div class="minima-row">Row ${row.row} — ${esc(row.label)}</div>
+    <div class="minima-row">Ceiling: <span class="req">${entry.base_height_ft} + ${row.ceiling_ft} = ${reqCeiling} ft required</span> — forecast ${esc(ceilingText)}</div>
+    <div class="minima-row">RVR/VIS: <span class="req">${entry.base_rvr_vis_m} + ${row.rvr_vis_m} = ${reqVis} m required</span> — forecast ${esc(visText)}</div>
+    <div class="minima-source">Source: ${esc(leg.ceiling_source || leg.vis_source || "baseline")}</div>
+    <div class="minima-row" style="margin-top:6px">
+      <span class="minima-edit" data-minima-action="enter" data-minima-icao="${esc(ap.icao)}">Edit</span>
+    </div>
+    ${disregardedHtml}
+  </div>`;
+}
+
+function _minimaFormHtml(icao, entry) {
+  const rowOptions = MINIMA_TABLE3.map(r =>
+    `<option value="${r.row}" ${entry && entry.row === r.row ? "selected" : ""}>Row ${r.row} — ${esc(r.label)}</option>`
+  ).join("");
+  return `<div class="panel-label">Planning Minima — ${esc(icao)}</div>
+    <div class="minima-form">
+      <label>Table 3 row</label>
+      <select data-minima-field="row">${rowOptions}</select>
+      <label>Base ceiling — DH/MDH, height above the aerodrome (ft). Not DA/MDA.</label>
+      <input type="number" data-minima-field="base_height_ft" value="${entry ? entry.base_height_ft : ""}" placeholder="e.g. 200">
+      <label>Base RVR/VIS (m)</label>
+      <input type="number" data-minima-field="base_rvr_vis_m" value="${entry ? entry.base_rvr_vis_m : ""}" placeholder="e.g. 550">
+      <div class="minima-form-actions">
+        <button type="button" class="minima-save" data-minima-action="save" data-minima-icao="${esc(icao)}">Save</button>
+        <button type="button" class="minima-cancel" data-minima-action="cancel">Cancel</button>
+      </div>
+    </div>`;
+}
+
+function _minimaFormError(block, msg) {
+  let err = block.querySelector(".minima-form-error");
+  if (!err) {
+    err = document.createElement("div");
+    err.className = "minima-form-error";
+    err.style.cssText = "color:#ff8080;font-size:0.82rem;margin-top:6px";
+    block.querySelector(".minima-form").appendChild(err);
+  }
+  err.textContent = msg;
+}
+
+// Dispatches every [data-minima-action] tap. Entry point for the delegated
+// click listener below — kept as one function so the click-isolation branch
+// stays a one-line lookup, matching ADR 0004 §4's tier-badge precedent.
+function _handleMinimaAction(el) {
+  const action = el.dataset.minimaAction;
+
+  if (action === "toggle-disregarded") {
+    const target = document.getElementById(el.dataset.minimaTarget);
+    if (target) target.hidden = !target.hidden;
+    return;
+  }
+
+  if (action === "enter") {
+    const block = el.closest(".minima-block");
+    if (!block) return;
+    const icao = el.dataset.minimaIcao;
+    block.innerHTML = _minimaFormHtml(icao, _minimaStore[icao]);
+    return;
+  }
+
+  if (action === "cancel") {
+    // Simplest correct refresh: re-render the whole panel from the data
+    // already held — the same re-render openPanel already does on reopen.
+    if (_openPanelData) openPanel(_openPanelData, _openPanelType);
+    return;
+  }
+
+  if (action === "save") {
+    const block = el.closest(".minima-block");
+    if (!block) return;
+    const icao       = el.dataset.minimaIcao;
+    const row        = parseInt(block.querySelector('[data-minima-field="row"]').value, 10);
+    const baseHeight = parseFloat(block.querySelector('[data-minima-field="base_height_ft"]').value);
+    const baseVis    = parseFloat(block.querySelector('[data-minima-field="base_rvr_vis_m"]').value);
+    if (!Number.isFinite(baseHeight) || !Number.isFinite(baseVis)) {
+      _minimaFormError(block, "Enter both base ceiling and base RVR/VIS.");
+      return;
+    }
+    fetch(`/api/minima/${icao}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ row, base_height_ft: baseHeight, base_rvr_vis_m: baseVis }),
+    })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error("save failed")))
+      .then(saved => {
+        _minimaStore[icao] = saved;
+        if (_openPanelData) openPanel(_openPanelData, _openPanelType);
+      })
+      .catch(() => _minimaFormError(block, "Could not save — check the connection and try again."));
+    return;
+  }
+}
+
 // ── buildPanel: MET for all legs first, then unified NOTAM block ─────────────
 function buildPanel(ap) {
   const legs = _legsFor(ap);
@@ -1704,6 +1960,8 @@ function buildPanel(ap) {
         <div class="panel-value" style="margin-top:5px">${esc(ov.text)}</div>
       </div>`;
     });
+
+    html += _minimaBlockHtml(ap, leg, metAttr);
   });
 
   // ── Unified NOTAM block ───────────────────────────────────────────────────
@@ -2092,6 +2350,9 @@ Promise.all([
       leg:  idx + 1,
       dep:  { icao: l.dep,  iata: depAp  && depAp.iata },
       dest: { icao: l.dest, iata: destAp && destAp.iata },
+      dest_altn: l.dest_altn || [],
+      era:       l.era || [],
+      rcf_altn:  l.rcf_altn || [],
     };
   });
 

@@ -48,6 +48,15 @@ RUNS_DIR   = os.path.join(HERE, "runs")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(RUNS_DIR,   exist_ok=True)
 
+# Alternate/ERA planning-minima store (docs/adr/0005) — an ICAO-keyed table of
+# hand-entered Table 3 rows + base minima, since Lido mPilot (the actual
+# source) is unreachable from this app. Lives in data/, which Railway wipes on
+# every redeploy (KNOWN_ISSUES #11) — accepted, not engineered around: an
+# already-completed run keeps its own minima_snapshot.json independent of
+# this live store.
+MINIMA_STORE_PATH = os.path.join(HERE, "data", "aerodrome_minima.json")
+_minima_lock = threading.Lock()
+
 # HIRA is switched off for now. The map hides its button and no-ops openHira()
 # (HIRA_ENABLED in index.html); this refuses the endpoint independently, so no
 # Sonnet call can be reached even by a direct POST. hira_engine.py and the
@@ -248,6 +257,47 @@ def _fmt_win(n):
     return notam_engine._fmt_daily_windows(n.get("daily_windows"))
 
 
+# ── Alternate/ERA planning-minima store (docs/adr/0005) ──────────────────────
+
+_MINIMA_ICAO_RE = re.compile(r"^[A-Z]{4}$")
+
+
+def _read_minima_store():
+    """Whole-file read. Missing or corrupt store degrades to {} — an entry
+    form must never crash because the file doesn't exist yet or was hand-
+    edited into invalid JSON."""
+    try:
+        with open(MINIMA_STORE_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _write_minima_entry(icao, entry):
+    """Read-modify-write a single ICAO's entry against the whole store file.
+    Locked and read-modify-write (not a wholesale client-held overwrite)
+    because a 3–4 leg upload opens two map tabs on one run, and either could
+    edit a different ICAO concurrently — the identical reasoning ADR 0004 §2
+    gives for tier-override writes."""
+    with _minima_lock:
+        store = _read_minima_store()
+        store[icao] = entry
+        os.makedirs(os.path.dirname(MINIMA_STORE_PATH), exist_ok=True)
+        tmp_path = MINIMA_STORE_PATH + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(store, f, indent=2)
+        os.replace(tmp_path, MINIMA_STORE_PATH)
+    return store[icao]
+
+
+def _minima_snapshot_for(icaos):
+    """The subset of the live store relevant to one group's alternate/ERA
+    ICAOs, for minima_snapshot.json (docs/adr/0005 §7) — safe to precache
+    aggressively since these are aerodrome facts, not flight data."""
+    store = _read_minima_store()
+    return {icao: store[icao] for icao in icaos if icao in store}
+
+
 # ── Multi-leg helpers ─────────────────────────────────────────────────────────
 
 def _merge_airports_legs(leg_airports_list):
@@ -266,6 +316,13 @@ def _merge_airports_legs(leg_airports_list):
                 "becmg_in_progress": ap.get("becmg_in_progress"),
                 "active_overlays":   ap.get("active_overlays", []),
                 "wx_tier":           ap.get("wx_tier", "YELLOW"),
+                "applicable_ceiling_ft":  ap.get("applicable_ceiling_ft"),
+                "applicable_vis_m":       ap.get("applicable_vis_m"),
+                "ceiling_source":         ap.get("ceiling_source"),
+                "vis_source":             ap.get("vis_source"),
+                "ceiling_indeterminate":  ap.get("ceiling_indeterminate", True),
+                "vis_indeterminate":      ap.get("vis_indeterminate", True),
+                "disregarded":            ap.get("disregarded", []),
             }
             if icao not in merged:
                 merged[icao] = {
@@ -817,6 +874,21 @@ def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
             with open(os.path.join(group_dir, "flight_info.json"), "w") as f:
                 json.dump(fi_out, f, indent=2)
 
+            # Alternate/ERA planning-minima snapshot (docs/adr/0005 §7) — this
+            # group's alternate/ERA ICAOs' entries from the live store, written
+            # unconditionally (even {}) so the file the manifest lists always
+            # exists on disk. Aerodrome minima are facts about the airport, not
+            # the flight, so — unlike hira.json — precaching them offline is
+            # safe; this file is deliberately not in _MANIFEST_EXCLUDE.
+            role_icaos = set()
+            for ld in leg_data:
+                fi = ld["flight_info"]
+                role_icaos.update(fi.get("dest_altn") or [])
+                role_icaos.update(fi.get("era") or [])
+                role_icaos.update(fi.get("rcf_altn") or [])
+            with open(os.path.join(group_dir, "minima_snapshot.json"), "w") as f:
+                json.dump(_minima_snapshot_for(role_icaos), f, indent=2)
+
             _progress(f"[G{g_num}] Complete.")
 
         _progress("Rendering source documents for click-to-highlight…")
@@ -1000,6 +1072,45 @@ def serve_manifest(run_id):
     if run_dir is None:
         return Response("Not found", status=404)
     return send_from_directory(run_dir, "manifest.json")
+
+
+@app.route("/api/minima", methods=["GET"])
+def get_minima_store():
+    """The whole aerodrome-minima store (docs/adr/0005) — small, ICAO-keyed,
+    fetched once by the client so a store edit needs no pipeline re-run.
+    Not run-scoped: these are aerodrome facts, shared across every flight."""
+    return jsonify(_read_minima_store())
+
+
+@app.route("/api/minima/<icao>", methods=["PUT"])
+def put_minima_entry(icao):
+    """Save one aerodrome's Table 3 row + base minima (docs/adr/0005 §2/§3).
+    Read-modify-write against the whole store — see _write_minima_entry."""
+    icao = icao.upper()
+    if not _MINIMA_ICAO_RE.match(icao):
+        return jsonify({"error": "icao must be 4 letters"}), 400
+
+    body = request.get_json(silent=True) or {}
+    try:
+        row = int(body["row"])
+        # Table 3's ft/m increments and published minima are always whole
+        # numbers — int(), not float(), so the entry form never displays a
+        # base minimum as "0.0 ft".
+        base_height_ft = int(body["base_height_ft"])
+        base_rvr_vis_m = int(body["base_rvr_vis_m"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "row, base_height_ft, base_rvr_vis_m are required numbers"}), 400
+    if row not in range(1, 7):
+        return jsonify({"error": "row must be 1-6 (OM-A Table 3)"}), 400
+
+    entry = {
+        "row": row,
+        "base_height_ft": base_height_ft,
+        "base_rvr_vis_m": base_rvr_vis_m,
+        "updated": datetime.now(timezone.utc).date().isoformat(),
+    }
+    saved = _write_minima_entry(icao, entry)
+    return jsonify(saved), 200
 
 
 @app.route("/api/hira", methods=["POST"])
