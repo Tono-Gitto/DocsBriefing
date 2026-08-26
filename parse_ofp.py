@@ -24,7 +24,10 @@ FLIGHT_TIME_MIN = 10 * 60 + 21  # 621
 _SKIP_RE = re.compile(
     r"^("
     r"OPERATIONAL FLIGHT PLAN PAGE"
-    r"|TIME ALT ALT"
+    r"|TIME ALT"  # repeated page-header row; observed as both "TIME ALT ALT
+                  # TIME ALT ALT" and "TIME ALT 1 ALT 2 STBY" (TG638) — match
+                  # on the stable prefix, not either literal full string, or
+                  # a future variant leaks in and desyncs the 3-line grouping
     r"|DEPARTURE TERMINAL"
     r"|DESTINATION TERMINAT"
     r"|ENROUTE CHECK"
