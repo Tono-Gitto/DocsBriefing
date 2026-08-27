@@ -517,6 +517,8 @@ def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeo
     notam_db, fir_db, general_db = notam_engine.parse_notam_pdf(notam_path)
 
     # ── Airport NOTAMs per leg ────────────────────────────────────────────────
+    import equipment_minima
+
     for ap in airports:
         for leg_entry in ap["legs"]:
             takeoff_utc = leg_takeoffs[leg_entry["leg"] - 1]
@@ -530,6 +532,20 @@ def _run_notam_step_multi(notam_path, group_dir, airports, leg_routes, leg_takeo
             active.sort(key=lambda x: x["tier"])
             leg_entry["notams"]        = active
             leg_entry["notam_covered"] = ap["icao"] in notam_db
+
+            # OM-A §8.1.3.3.6 failed/downgraded ground equipment (docs/adr/0006).
+            # Deliberately reads `raw`, NOT `active`: the finding gate is an
+            # ETA±1h *overlap* (ADR 0006 §8) while `active` is a point-in-time
+            # filter that has already discarded the rows the band needs — and
+            # `active` drops win_start/win_end/daily_windows/date_schedules
+            # entirely. A finding can therefore cite a NOTAM with no tile at
+            # all in the panel, which is why its Source Pane anchor matters.
+            leg_entry["equipment_findings"] = equipment_minima.findings_for_airport(
+                raw,
+                ref_dt - timedelta(hours=1),
+                ref_dt + timedelta(hours=1),
+                window_fmt=_fmt_win,
+            )
 
     # AI summaries — deduplicated across legs
     to_sum = {}
@@ -889,6 +905,15 @@ def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
             with open(os.path.join(group_dir, "minima_snapshot.json"), "w") as f:
                 json.dump(_minima_snapshot_for(role_icaos), f, indent=2)
 
+            # OM-A §8.1.3.3.2 "RVR versus DH/MDH" lookup (docs/adr/0006 §9).
+            # Written into the group dir rather than served from /api/* because
+            # sw.js treats /api/* as network-only — as a briefing file it rides
+            # ADR 0003's existing manifest precache with no service-worker
+            # change. A regulatory constant, so it is identical in every group.
+            import equipment_minima
+            with open(os.path.join(group_dir, "rvr_table.json"), "w") as f:
+                json.dump(equipment_minima.rvr_table_payload(), f, indent=2)
+
             _progress(f"[G{g_num}] Complete.")
 
         _progress("Rendering source documents for click-to-highlight…")
@@ -1092,18 +1117,41 @@ def put_minima_entry(icao):
 
     body = request.get_json(silent=True) or {}
     try:
-        row = int(body["row"])
         # Table 3's ft/m increments and published minima are always whole
         # numbers — int(), not float(), so the entry form never displays a
         # base minimum as "0.0 ft".
         base_height_ft = int(body["base_height_ft"])
         base_rvr_vis_m = int(body["base_rvr_vis_m"])
     except (KeyError, TypeError, ValueError):
-        return jsonify({"error": "row, base_height_ft, base_rvr_vis_m are required numbers"}), 400
-    if row not in range(1, 7):
-        return jsonify({"error": "row must be 1-6 (OM-A Table 3)"}), 400
+        return jsonify({"error": "base_height_ft and base_rvr_vis_m are required numbers"}), 400
+
+    # `row` is OPTIONAL since docs/adr/0006 §4: the failed-equipment finding is
+    # NOTAM-triggered and role-independent, so an enroute contingency aerodrome
+    # can legitimately have a DH/MDH and an approach but no Table 3 row — it has
+    # no planning role for a row to describe. Table 3 still requires one
+    # wherever a planning role exists; that is enforced at render time, not here.
+    row = body.get("row")
+    if row not in (None, ""):
+        try:
+            row = int(row)
+        except (TypeError, ValueError):
+            return jsonify({"error": "row must be 1-6 (OM-A Table 3)"}), 400
+        if row not in range(1, 7):
+            return jsonify({"error": "row must be 1-6 (OM-A Table 3)"}), 400
+    else:
+        row = None
+
+    # Free-text approach label ("VOR DME RWY 36"), docs/adr/0006 §4. Only the
+    # runway designator is ever parsed out of it, client-side, to decide whether
+    # a runway-specific equipment failure applies to THIS approach. Free text
+    # rather than a picker for the same reason ADR 0005 §2 chose manual row
+    # selection: it is a judgment already made by whoever read Lido, and a
+    # structured field would need an approach inventory this tool has no source
+    # for. Length-capped so the store can't be used as arbitrary storage.
+    approach = (body.get("approach") or "").strip()[:60]
 
     entry = {
+        "approach": approach,
         "row": row,
         "base_height_ft": base_height_ft,
         "base_rvr_vis_m": base_rvr_vis_m,

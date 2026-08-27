@@ -269,3 +269,58 @@ row would silently apply — in the false-PASS direction, since the EDTO row tre
 transient-phenomenon TEMPO deterioration as applicable where the fuel-ERA row disregards it.
 Nothing currently triggers this; recorded so it isn't rediscovered as a fresh bug the first
 time it does.
+
+## #13 — Destination planning minima (§8.1.3.2.3) are not computed
+
+**Status:** accepted, deferred out of ADR 0006 v1.
+
+The failed-equipment feature re-determines *landing* minima at every airport, destination
+included. But the destination's planning check — OM-A §8.1.3.2.3, which uses the approach
+minima with **no** Table 3 increment and tests "ceiling above MDH" rather than
+"MDH + increment" — is not built. A destination shows the Failed Ground Equipment block and
+a Planning Minima block reading `NOT COMPUTED`, never a PASS.
+
+It is a third arithmetic, and shipping it also needs `minima_snapshot.json` extended to
+destination ICAOs (ADR 0005 §7 snapshots only alternate/ERA/`rcf_altn`). This is the
+weakest point of ADR 0006's scope and the first thing to revisit.
+
+## #14 — Two NOTAM schedule forms are unparsed, so their windows read as continuous
+
+`notam_engine._parse_daily_windows()` and `_parse_date_schedules()` both miss the
+quoted day-of-month form that TG638's VTBU `VTBDJ6288/26` uses:
+
+```
+"25 0800-1200, 26 0230-1000"
+```
+
+`_DATE_SCHED_RE` requires a month name (`JUN 29 1900-2330`), and the comma-separated
+day-number form matches neither pattern. The NOTAM therefore keeps only its absolute
+window (`*25 AUG 2026 08:00 – 26 AUG 2026 10:00*`) and reads as continuously active
+across the whole 26 hours, including 26 AUG 0000–0230Z when it is not.
+
+This predates ADR 0006 and already affects NOTAM tiles via `_effective_tier`. It bounds how
+precise the equipment-finding band gate (ADR 0006 §8) can be. Not fixed because that
+particular NOTAM is an ILS flight check — not a §8.1.3.3.6 facility — so it produces no
+finding either way; but any NOTAM using this form has the same imprecision.
+
+## #15 — Failed-equipment findings: accepted imprecisions
+
+All from ADR 0006, all deliberate:
+
+- **Net 2 noise.** 71 findings across 28 distinct texts in the nine fixture NOTAM PDFs are
+  reported as "not among the facilities §8.1.3.3.6 permits" — stopway lights, guard lights,
+  RETIL, exit-taxiway indicators, apron/stand lighting, ambiguous "LGT FOR RWY 16L". One
+  tuning pass has been done. Over-reporting is the deliberate trade against a silent miss;
+  anything appearing here is also a candidate missing alias in net 1.
+- **Circling has no column of its own.** §8.1.3.3.6's table has only Type B and Type A
+  columns. A circling MDH is ≥ 250 ft and therefore lands in Type A.
+- **A named enroute DME outage still produces a DME finding.** `DME 'LMN' U/S` is a listed
+  facility with a failure verb; the tool cannot tell it is not the approach's DME. It
+  renders as informational unless its runway matches the recorded approach.
+- **Offline, layer 1's arithmetic only works where minima were snapshotted.** Findings and
+  the RVR table precache everywhere, but the store entry does not: `minima_snapshot.json`
+  covers alternate/ERA/`rcf_altn` ICAOs only. So a destination or enroute airport with a
+  finding shows the finding and the class downgrade offline, but no re-determined number.
+  Online it works — the client fetches the whole store. Extending the snapshot to every
+  airport in `airports.json` would bake ~50 entries into every group dir to serve the
+  handful that ever have one.

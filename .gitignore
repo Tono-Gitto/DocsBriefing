@@ -33,3 +33,6 @@ __pycache__/
 # macOS
 .DS_Store
 CLAUDE.md
+
+# OM-A (73 MB controlled document — never commit)
+Input/OM-A_*.pdf

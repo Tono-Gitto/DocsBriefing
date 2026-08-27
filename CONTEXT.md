@@ -94,3 +94,28 @@ detail. See `CLAUDE.md` for architecture and `docs/adr/` for decisions.
   OM-A §8.1.6's TAF/TREND applicability table. A transient/shower TEMPO or a combined
   PROB30/40 TEMPO is excluded outright rather than folded in, however severe its own
   numbers — every exclusion is still shown to the dispatcher, never silently dropped.
+
+## Failed Ground Equipment
+
+- **Equipment Finding** — one failed or downgraded §8.1.3.3.6 facility, on one runway, from
+  one NOTAM. A NOTAM naming two facilities on two runways produces two findings. Findings
+  are triggered by the NOTAM, not by the aerodrome's role — they appear at any airport,
+  including enroute contingency ones, and nowhere at all when nothing is broken.
+- **Applicable Finding** — an Equipment Finding whose runway matches the runway of the
+  aerodrome's recorded **Planned Approach**. Only these change a number. A finding on
+  another runway, or one that cannot be matched because no approach is recorded, is still
+  shown — outside the arithmetic and labelled as such.
+- **Planned Approach** — free text recorded alongside an aerodrome's **Base Minima**
+  ("VOR DME RWY 36"), naming which approach those minima describe. Only its runway
+  designator is parsed. Without it nothing can be an Applicable Finding, because there is
+  no way to tell whether a runway-specific failure touches the stored numbers.
+- **Class Downgrade** — the §8.1.3.3.6 effect of failed approach lighting: the aerodrome is
+  treated as having a lower class of lighting facility (FALS → IALS → BALS → NALS), which
+  is then looked up against the DH/MDH to yield a new RVR. Not an additive penalty — a
+  substitution feeding a second table.
+- **Re-determined Minima** — the landing minima after applying the §8.1.3.3.6 table: the
+  higher of the Class-Downgrade lookup (and any RVR floor) and the charted **Base Minima**.
+  Role-independent — the same figure whether the aerodrome is a destination, an alternate,
+  or a diversion field. Where a planning role exists, this is what **Table 3 Row**'s
+  increment is added to, replacing the charted value. Only RVR/VIS is ever re-determined:
+  §8.1.3.3.6 states that failures other than ILS/GLS affect RVR only, not DH.
