@@ -2141,6 +2141,22 @@ function _minimaBlockHtml(ap, leg, metAttr) {
   const role = _minimaRole(ap.icao, leg.leg);
   if (!role) return "";
 
+  // Layer 2 is PAIRED with layer 1: no equipment finding on this leg, no
+  // Planning Minima block. The same gate _equipmentBlockHtml uses, so the two
+  // appear and disappear together.
+  //
+  // This deliberately narrows ADR 0005. Its block was a standing §8.1.3.2.4
+  // selectability check on every alternate/ERA on every leg — correct in
+  // regulation, but in practice most aerodromes have no hand-entered base
+  // minima, so it rendered "No entry — Enter minima" on every alternate of
+  // every leg and the signal drowned. Gating it on an actual equipment finding
+  // means it appears when a NOTAM has changed something and is otherwise silent.
+  //
+  // The cost, stated so nobody rediscovers it as a bug: a weather-marginal
+  // alternate with all equipment serviceable now shows no PASS/FAIL. Deleting
+  // these two lines restores ADR 0005's original always-on behaviour.
+  if (!(leg.equipment_findings || []).length) return "";
+
   // §8.1.3.2.3's destination rule is deferred out of v1 (docs/adr/0006 §3):
   // no increment, and "ceiling above MDH" is a strict inequality against a
   // different quantity than Table 3's "MDH + increment". Rendering it as

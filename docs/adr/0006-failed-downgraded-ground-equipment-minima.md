@@ -375,6 +375,20 @@ ADR asserted the opposite; the pipeline order is what settles it.)
 
 ### 10. Surface: two blocks, adjacent, per leg; findings split three ways
 
+**Layer 2 is gated on layer 1.** Planning Minima renders only on a leg that has at least
+one equipment finding — the same gate as the Failed Ground Equipment block, so the two
+appear and disappear together. This **narrows ADR 0005**, which rendered its block
+unconditionally on every `dest_altn`/`era`/`rcf_altn` for every leg as a standing
+§8.1.3.2.4 selectability check. In practice most aerodromes have no hand-entered base
+minima, so that block printed `No entry — Enter minima` on every alternate of every leg and
+the signal drowned in it.
+
+The cost is real and accepted rather than overlooked: a weather-marginal alternate with all
+equipment serviceable now shows no PASS/FAIL at all, even though §8.1.3.2.4 applies to it.
+Recorded as KNOWN_ISSUES #16. The gate is two lines at the top of `_minimaBlockHtml`;
+deleting them restores ADR 0005's always-on behaviour. If the always-on check is wanted
+back without the noise, the narrower fix is to suppress only the `No entry` state.
+
 **Two blocks, not one**, mirroring §3's two layers:
 
 - `FAILED GROUND EQUIPMENT · §8.1.3.3.6` — layer 1, renders wherever a finding exists, for
@@ -515,6 +529,9 @@ was baked in at build time, read-only, per ADR 0003's no-fork rule.
   precedent, because it discards two published worked examples as regression fixtures.
 - **Net 2 will be noisy on first release.** Tuning it down against the nine fixture NOTAM PDFs
   is expected work, and the correct trade against a silent miss.
+- **Layer 2 no longer renders on its own** (§10). ADR 0005's standing selectability check is
+  now conditional on an equipment finding — a deliberate narrowing for signal, at the cost of
+  losing the PASS/FAIL on a marginal alternate whose equipment is fine (KNOWN_ISSUES #16).
 - **Deferred — layer 2 at the destination** (§3). The aerodrome the crew actually lands at gets
   the re-determination but not the PASS/FAIL comparison, which is the weakest point of the v1
   scope and the first thing to revisit. `KNOWN_ISSUES` entry, not a silent omission.

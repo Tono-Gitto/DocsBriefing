@@ -324,3 +324,25 @@ All from ADR 0006, all deliberate:
   Online it works — the client fetches the whole store. Extending the snapshot to every
   airport in `airports.json` would bake ~50 entries into every group dir to serve the
   handful that ever have one.
+
+## #16 — Planning Minima only renders where equipment has failed
+
+**Status:** accepted, deliberate (ADR 0006 §10, narrowing ADR 0005).
+
+ADR 0005 rendered the Planning Minima block on every `dest_altn`/`era`/`rcf_altn` for every
+leg — OM-A §8.1.3.2.4's selectability check applies to an alternate whether or not any
+equipment is failed. It is now gated on the leg having at least one §8.1.3.3.6 equipment
+finding, so it appears only alongside the Failed Ground Equipment block.
+
+**Why:** the base minima are hand-entered and most aerodromes have none, so the block
+printed `No entry for XXXX — Enter minima` on every alternate of every leg. The regulatory
+check was invisible inside its own noise.
+
+**What is lost:** a weather-marginal alternate with all equipment serviceable now shows no
+PASS/FAIL. That is the majority case, and it is a genuine regression against §8.1.3.2.4 —
+recorded rather than hidden.
+
+**Restoring it:** delete the two-line `equipment_findings` gate at the top of
+`_minimaBlockHtml` in `index.html`. A middle option, if the noise is the real problem rather
+than the block itself, is to suppress only the `No entry` state and keep the block wherever
+minima have actually been entered.
