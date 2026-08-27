@@ -2024,10 +2024,15 @@ function _equipmentBlockHtml(ap, leg, metAttr) {
   if (eff.stops.length) head += ` <span class="minima-verdict eqp-stop">APPROACH NOT AVAILABLE</span>`;
   head += `</div>`;
 
-  const approachLine = entry && entry.approach
-    ? `<div class="eqp-approach">${esc(entry.approach)}${
+  // Shown whenever an entry exists, independent of whether the approach text
+  // is set or the arithmetic below resolves — the stored DH/MDH/RVR is always
+  // editable here, not just on first entry (this block can render with no
+  // Planning Minima block underneath it to carry an Edit link instead).
+  const approachLine = entry
+    ? `<div class="eqp-approach">${entry.approach ? esc(entry.approach) : "No planned approach recorded"}${
         entry.base_height_ft !== null && entry.base_height_ft !== undefined
-          ? ` · DH/MDH ${entry.base_height_ft} ft${type ? ` · Type ${type}` : ""}` : ""}</div>`
+          ? ` · DH/MDH ${entry.base_height_ft} ft${type ? ` · Type ${type}` : ""}` : ""}
+        <span class="minima-edit" data-minima-action="enter" data-minima-icao="${esc(ap.icao)}">Edit</span></div>`
     : "";
 
   let body = "";
@@ -2276,7 +2281,11 @@ function _minimaFormHtml(icao, entry) {
   const rowOptions = MINIMA_TABLE3.map(r =>
     `<option value="${r.row}" ${entry && entry.row === r.row ? "selected" : ""}>Row ${r.row} — ${esc(r.label)}</option>`
   ).join("");
-  return `<div class="panel-label">Planning Minima — ${esc(icao)}</div>
+  // "Aerodrome Minima", not "Planning Minima": since docs/adr/0006 this one
+  // entry feeds BOTH blocks, and the form is reached from the Failed Ground
+  // Equipment block too (its `.minima-block` class is what el.closest() finds).
+  // Titling it "Planning Minima" there labelled the form after the wrong block.
+  return `<div class="panel-label">Aerodrome Minima — ${esc(icao)}</div>
     <div class="minima-form">
       <label>Planned approach — the runway designator is matched against equipment NOTAMs (§8.1.3.3.6)</label>
       <input type="text" data-minima-field="approach" value="${entry && entry.approach ? esc(entry.approach) : ""}" placeholder="e.g. VOR DME RWY 36">
