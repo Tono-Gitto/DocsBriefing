@@ -487,7 +487,14 @@ def parse_notam_pdf(pdf_path):
             body_lines = [l for l in cur_body if l]
             is_fir = current_section == "ENROUTE"
             is_general = current_section in _GENERAL_SECTIONS
-            is_com_info = cur_is_ci and is_general
+            # COM-INFO splitting applies in every section, not just GENERAL/FLIGHT
+            # LEG/AEROPLANE — the bundling behaviour (several independently-dated
+            # sub-notices under one ID, "--"-delimited) is a property of the PDF's
+            # COM-INFO tag itself, not of which section it happens to appear under;
+            # AERODROME/ADDITIONAL/ENROUTE bundles are just as common (e.g. VTBS's
+            # THA 00064/25, which bundles a RETIL outage, a VDGS outage, a DVOR/DME
+            # suspension and a taxiway closure into one NOTAM).
+            is_com_info = cur_is_ci
             parts = _split_com_info_parts(body_lines) if is_com_info else [body_lines]
             multi = len(parts) > 1
             for idx, part_lines in enumerate(parts):

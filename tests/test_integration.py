@@ -100,6 +100,31 @@ class TestTG921NOTAMValidation:
             for n in notams:
                 assert n["tier"] in (1, 2, 3), f"{icao}: unexpected tier {n['tier']}"
 
+    def test_airport_section_com_info_bundle_is_split(self, notam_db):
+        # VTBS's THA 00064/25 is an AERODROME-section COM-INFO bundle (RETIL
+        # outage, VDGS outage, DVOR/DME suspension, taxiway closure, all under
+        # one ID) — splitting used to be GENERAL/FLIGHT LEG/AEROPLANE-only; it
+        # now applies here too. See CLAUDE.md's "COM-INFO bulletin splitting".
+        parts = [n for n in notam_db["VTBS"] if n["id"].startswith("THA 00064/25")]
+        assert len(parts) == 4
+        assert [n["id"] for n in parts] == [f"THA 00064/25 [{i}]" for i in range(1, 5)]
+        assert all(n["com_info_part"] for n in parts)
+        # Each part stands on its own _classify_tier() verdict — no promotion
+        # (that only exists for GENERAL/FLIGHT LEG/AEROPLANE, gated on the AI
+        # relevance filter airport NOTAMs don't go through).
+        assert [n["tier"] for n in parts] == [3, 2, 1, 3]
+
+    def test_enroute_section_com_info_bundle_is_split(self, notam_db):
+        # ENROUTE (FIR) COM-INFO bundles split too — not exercised by notam_db
+        # (airport-only), so parse directly. OPLR's THA 00049/26 has one "--"
+        # boundary → two parts.
+        import sys
+        sys.path.insert(0, ROOT)
+        from notam_engine import parse_notam_pdf
+        _, fir_db, _ = parse_notam_pdf(FIXTURE_NOTAM)
+        oplr_ids = [n["id"] for n in fir_db["OPLR"]["notams"] if "THA 00049/26" in n["id"]]
+        assert oplr_ids == ["THA 00049/26 [1]", "THA 00049/26 [2]"]
+
 
 @pytest.mark.integration
 class TestMetAnchors:
@@ -258,6 +283,17 @@ class TestNotamAnchors:
     def test_missing_id_absent_not_raised(self, parsed):
         anchors, _ = parsed
         assert "EDDF|NOSUCHNOTAM/99" not in anchors
+
+    def test_airport_section_com_info_parts_get_own_anchors(self, parsed):
+        # VTBS's THA 00064/25 (AERODROME section) splits into 4 parts (see
+        # TestTG921NOTAMValidation.test_airport_section_com_info_bundle_is_split);
+        # each should get its own precise box, not just the whole-block fallback.
+        anchors, _ = parsed
+        whole = anchors.get("VTBS|THA 00064/25")
+        for i in range(1, 5):
+            key = f"VTBS|THA 00064/25 [{i}]"
+            assert key in anchors, f"missing per-part anchor {key}"
+            assert anchors[key] != whole, f"{key} fell back to the whole-block box"
 
     def test_hit_rate_against_parsed_notams(self, notam_db, parsed):
         # Cross-check against the real parser's airport NOTAMs (already parsed by

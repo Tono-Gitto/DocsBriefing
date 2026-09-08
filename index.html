@@ -1797,13 +1797,17 @@ function tierBadgeClass(tier) {
   return tier === 1 ? "badge-t1" : tier === 2 ? "badge-t2" : "badge-t3";
 }
 
-// A COM-INFO bulletin split into several general_notams.json parts (see
-// notam_engine._split_com_info_parts) shares ONE notam_anchors.json entry —
-// the physical PDF block isn't split, only the summarized record is — so each
-// part's synthetic "<id> [N]" key misses the exact anchors lookup. Strip the
-// suffix and retry before giving up, so every part still resolves to the one
-// shared block highlight. Returns the key to actually use, or null on a true
-// miss (unrelated to splitting — the graceful-miss path everywhere else).
+// A COM-INFO bulletin split into several parts (see
+// notam_engine._split_com_info_parts, applied in every NOTAM section) usually
+// gets a matching per-part notam_anchors.json entry too (notam_anchors.py
+// partitions the same PDF block the same way). But the two modules walk the
+// PDF via independent extraction paths that can occasionally disagree on a
+// given block's lines, in which case that one part's exact "<id> [N]" key
+// just won't exist in notam_anchors.json. Strip the suffix and retry before
+// giving up, so a mismatched part still resolves to the shared whole-block
+// highlight instead of going unclickable. Returns the key to actually use,
+// or null on a true miss (unrelated to splitting — the graceful-miss path
+// everywhere else).
 function _resolveAnchorKey(doc, key) {
   const anchors = _srcPane.docs[doc].anchors;
   if (!anchors || !key) return null;

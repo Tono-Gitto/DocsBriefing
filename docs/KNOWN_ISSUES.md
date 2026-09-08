@@ -3,7 +3,7 @@
 Open problems, unproven claims, and accepted limitations. Close an entry by deleting it in
 the same commit that fixes it.
 
-Last reviewed: 2026-08-26, adding #11 and #12 (docs/adr/0005, alternate/ERA planning minima).
+Last reviewed: 2026-09-08, adding #17 (COM-INFO splitting extended to all NOTAM sections).
 
 | # | Issue | Severity |
 |---|---|---|
@@ -18,6 +18,7 @@ Last reviewed: 2026-08-26, adding #11 and #12 (docs/adr/0005, alternate/ERA plan
 | 10 | `_GROUP_RE` misses a space-split `FM DDHHMM`, running two TAF states together | low |
 | 11 | `data/aerodrome_minima.json` is wiped on every Railway redeploy — unlike tiles/fir_coords, not re-derivable | accepted |
 | 12 | `era` extraction can't distinguish Fuel ERA from a future EDTO ERA in the same field | low |
+| 17 | A manual tier override can go silently inert if its NOTAM later splits into COM-INFO parts | accepted |
 
 ---
 
@@ -346,3 +347,28 @@ recorded rather than hidden.
 `_minimaBlockHtml` in `index.html`. A middle option, if the noise is the real problem rather
 than the block itself, is to suppress only the `No entry` state and keep the block wherever
 minima have actually been entered.
+
+---
+
+## #17 — A manual tier override can go silently inert if its NOTAM later splits
+
+**Status:** accepted, deliberate. No migration attempted.
+
+COM-INFO bundle splitting (`notam_engine._split_com_info_parts`) now runs in every NOTAM
+section, not just `GENERAL`/`FLIGHT LEG`/`AEROPLANE`. If a pilot sets a manual tier override
+(ADR 0004) on an airport/FIR NOTAM that is a whole, unsplit COM-INFO bundle at the time
+(`localStorage` key `<owner>|<id>`), and the flight is later re-uploaded after that bundle
+picks up a `--` boundary it didn't have before, the rendered rows become
+`<owner>|<id> [1]`..`[N]` — none of which match the old key. The override becomes an inert,
+orphaned `localStorage` entry: not lost data, not a crash, just silently stops applying.
+
+**Why not migrated:** the old override has no way to know which of the N new sub-notices it
+was about — a RETIL-outage override and a DVOR/DME-suspension override look identical once
+collapsed to one bundle-level key. Guessing wrong (e.g. defaulting it onto part `[1]`) would
+be worse than doing nothing, since it would silently misapply a pilot's judgment to an
+unrelated sub-notice.
+
+**How likely in practice:** narrow. It requires an override to exist on a bundle that (a) was
+whole at override time and (b) gains new sub-notices or a `--` boundary on a later
+re-upload of the same recurring flight — a bundle's dash-boundary structure is set by the
+NOTAM PDF's own formatting, not something that changes flight-to-flight for a fixed bundle.

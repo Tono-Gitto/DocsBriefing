@@ -12,7 +12,9 @@ simply absent from the returned dict (see CONTEXT.md — "Anchor").
 A COM-INFO bulletin (see notam_engine._split_com_info_parts) gets its own
 precise per-sub-notice anchors ("<owner>|<id> [N]") in addition to the whole
 block's anchor, using the shared _partition_at_dash_boundaries boundary rule
-so its split lines up with general_notams.json's. If the two independent
+so its split lines up with airports.json/fir_notams.json/general_notams.json's
+— in every section, not just GENERAL/FLIGHT LEG/AEROPLANE, matching
+notam_engine's own unconditional-on-the-tag scope. If the two independent
 PDF-line extraction paths this module and notam_engine each use ever
 disagree for some NOTAM, the frontend's key-resolution fallback (index.html
 _resolveAnchorKey) degrades that mismatched part back to the whole-block box
@@ -38,7 +40,7 @@ from notam_engine import (
 _Y_PAD_FRAC = 0.005  # ~0.5% of page height, so the box doesn't kiss the glyphs
 
 # ── Special Security Arrangement (SSA) sub-parsing ────────────────────────────
-# One COM-INFO GENERAL part occasionally bundles a "SUBJ: SPECIAL SECURITY
+# One COM-INFO part (any section) occasionally bundles a "SUBJ: SPECIAL SECURITY
 # ARRANGEMENT" bulletin, itself structured as several station-code groups, each
 # stating a security LEVEL for those stations. This is flight-independent (it
 # doesn't know or care which airport a given upload's dep/dest is) — it just
@@ -297,14 +299,14 @@ def extract_anchors(pdf_path):
         nonlocal cur_key, cur_lines, cur_is_ci
         if cur_key and cur_lines and cur_key not in anchors:  # first occurrence wins
             anchors[cur_key] = _lines_to_rects([l[:5] for l in cur_lines], page_sizes)
-            # COM-INFO bulletins (GENERAL/FLIGHT LEG/AEROPLANE only, matching
-            # notam_engine._split_com_info_parts's own scope) bundle several
-            # sub-notices in one block; give each its own precise anchor
-            # ("<owner>|<id> [N]", matching general_notams.json's split id)
-            # instead of leaving every part pointing at the whole block.
-            # cur_lines[0] is the ID/header line itself — never part of a
-            # sub-notice's own box, so only cur_lines[1:] is partitioned.
-            if cur_is_ci and current_section in _GENERAL_SECTIONS and len(cur_lines) > 1:
+            # COM-INFO bulletins (any section — matching notam_engine's own
+            # unconditional-on-cur_is_ci scope) bundle several sub-notices in
+            # one block; give each its own precise anchor ("<owner>|<id> [N]",
+            # matching airports.json/fir_notams.json/general_notams.json's
+            # split id) instead of leaving every part pointing at the whole
+            # block. cur_lines[0] is the ID/header line itself — never part of
+            # a sub-notice's own box, so only cur_lines[1:] is partitioned.
+            if cur_is_ci and len(cur_lines) > 1:
                 body = cur_lines[1:]
                 groups = _partition_at_dash_boundaries(body, text_of=lambda item: item[5])
                 if len(groups) > 1:
