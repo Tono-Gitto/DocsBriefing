@@ -117,6 +117,38 @@ class TestVtbuFixtureShape:
         assert any(f["runway"] == "18" for f in _findings(self.BODY))
 
 
+class TestAvblApchLightLength:
+    """RJFF's RJAAF0920/26 (TG664/TG677 fixtures): a partial approach-light
+    failure that states a remaining serviceable length must be classified by
+    that length (OM-A "Approach lighting systems" table), not defaulted to
+    the total-failure NALS row — 427 m falls in IALS's 420-719 m bracket."""
+
+    BODY = "PALS FOR RWY 16L PARTLY U/S DUE TO CONST\nRMK: AVBL APCH LGT LEN 427M"
+
+    def test_classifies_by_available_length(self):
+        fs = _findings(self.BODY)
+        assert len(fs) == 1
+        assert fs[0]["runway"] == "16L"
+        assert fs[0]["outcome_a"] == {"kind": "class", "class": "IALS",
+                                       "note": "427 m of approach lights available (NOTAM remark)"}
+        assert fs[0]["outcome_b"] == fs[0]["outcome_a"]
+
+    @pytest.mark.parametrize("length_m,expected", [
+        (209, "NALS"), (210, "BALS"),   # BALS floor
+        (419, "BALS"), (420, "IALS"),   # IALS floor
+        (719, "IALS"), (720, "FALS"),   # FALS floor
+    ])
+    def test_length_class_boundaries(self, length_m, expected):
+        assert em._apch_class_for_length(length_m) == expected
+
+    def test_no_remark_still_defaults_to_nals(self):
+        """No stated remaining length -> OM-A Example 1's own answer: total
+        failure, minima as for NALS. Must not regress when a remark exists on
+        an unrelated NOTAM elsewhere in the same airport's list."""
+        fs = _findings("PALS FOR RWY 16L U/S DUE TO MAINT")
+        assert fs[0]["outcome_a"] == {"kind": "class", "class": "NALS"}
+
+
 class TestScopeExclusions:
     def test_primary_aid_removal_yields_nothing(self):
         """ILS RWY 18 U/S takes the approach away rather than degrading one

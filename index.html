@@ -1922,7 +1922,7 @@ function _eqpOutcome(f, type) {
 function _eqpOutcomeText(o) {
   switch (o.kind) {
     case "no_effect":   return "no effect" + (o.note ? ` — ${o.note}` : "");
-    case "class":       return `minima as for ${o.class}`;
+    case "class":       return `minima as for ${o.class}` + (o.note ? ` — ${o.note}` : "");
     case "floor":       return `minimum RVR ${o.rvr_m} m` + (o.note ? ` — ${o.note}` : "");
     case "not_allowed": return "NOT ALLOWED" + (o.note ? ` — ${o.note}` : "");
     case "unmapped":    return "not among the facilities §8.1.3.3.6 permits for this determination — minima cannot be re-determined from it";

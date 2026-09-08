@@ -125,8 +125,8 @@ def _no_effect(note=None):
     return {"kind": "no_effect", "note": note}
 
 
-def _downgrade(cls):
-    return {"kind": "class", "class": cls}
+def _downgrade(cls, note=None):
+    return {"kind": "class", "class": cls, "note": note} if note else {"kind": "class", "class": cls}
 
 
 def _floor(rvr_m, note=None):
@@ -198,6 +198,11 @@ _FACILITIES = [
                     r"|(?:APCH|APPROACH)\s+(?:LGT|LIGHT)\w*"
                     r"|(?:LGT|LIGHT)\w*\s+(?:APCH|APPROACH)\s+SYS\w*"
                     r"|\bALS\b)"),
+        # Default: a bare "U/S"/"PARTLY U/S" with no stated remaining length is
+        # the manual's own Example 1 (APL unserviceable -> NALS). Overridden
+        # below when the body also states an available length (RJFF's
+        # RJAAF0920/26: "PALS ... PARTLY U/S ... RMK: AVBL APCH LGT LEN 427M"
+        # is not a total failure and must not be classed as one).
         "b": _downgrade("NALS"), "a": _downgrade("NALS"),
     },
     {
@@ -364,6 +369,36 @@ _COMPOUND_DME_RE = re.compile(
 
 _RWY_RE = re.compile(r"\bRWY\s*(\d{2}[LRC]?(?:/\d{2}[LRC]?)*)", re.I)
 
+# A NOTAM'd approach-light failure that also states a remaining serviceable
+# length is not the manual's Example 1 (total failure -> NALS) — it is the
+# same "except the last N m" idea the table's two named rows already encode
+# (`except the last 210 m` -> BALS, `except the last 420 m` -> IALS), just
+# phrased as the length still AVAILABLE rather than the length lost. Both
+# phrasings describe the same fact, so both must resolve through the
+# "Approach lighting systems" table (OM-A §8.1.3.3.2), not through the
+# full-failure row. Anchored narrowly on the one wording seen in the fixture
+# NOTAMs (`RMK: AVBL APCH LGT LEN 427M`) — this module's classification only
+# ever gets more permissive here, never more restrictive, so a missed variant
+# fails safe (falls through to NALS) while a false-positive match would not.
+_AVBL_APCH_LEN_RE = re.compile(
+    r"AVBL\s+(?:APCH|APPROACH)\s+(?:LGT|LIGHT)\w*\s+LEN\s*(\d+)\s*M",
+    re.I,
+)
+
+
+def _apch_class_for_length(length_m):
+    """OM-A "Approach lighting systems" table (§8.1.3.3.2): FALS >= 720 m,
+    IALS 420-719 m, BALS 210-419 m, NALS < 210 m or no lights at all — the
+    same brackets the failure table's two named rows already pin (BALS at the
+    210 m floor, IALS at the 420 m floor)."""
+    if length_m >= 720:
+        return "FALS"
+    if length_m >= 420:
+        return "IALS"
+    if length_m >= 210:
+        return "BALS"
+    return "NALS"
+
 
 def _runways_in(text):
     """[(char_pos, 'nn[L|R|C]'), ...] — `RWY02R/20L` yields both ends."""
@@ -520,6 +555,11 @@ def extract_findings(notam, band_start, band_end):
         if not is_active_in_band(notam, band_start, band_end):
             return []
 
+        avbl_len_m = None
+        m = _AVBL_APCH_LEN_RE.search(body)
+        if m:
+            avbl_len_m = int(m.group(1))
+
         out = []
         # Line-by-line, not one flattened blob.  A NOTAM line is the unit that
         # carries a failure verb: `PALS CAT 1 RWY 18 AND SALS RWY 36 U/S` has
@@ -543,6 +583,13 @@ def extract_findings(notam, band_start, band_end):
                 if fac is not None and fac["key"] == "dme":
                     if _COMPOUND_DME_RE.search(line[max(0, s - 12):s + 4]):
                         continue
+                outcome_b = fac["b"] if fac else {"kind": "unmapped"}
+                outcome_a = fac["a"] if fac else {"kind": "unmapped"}
+                if fac is not None and fac["key"] == "apch_lights" and avbl_len_m is not None:
+                    note = f"{avbl_len_m} m of approach lights available (NOTAM remark)"
+                    cls = _apch_class_for_length(avbl_len_m)
+                    outcome_b = _downgrade(cls, note)
+                    outcome_a = _downgrade(cls, note)
                 for rwy in _runways_for(hits, i, line):
                     out.append({
                         "facility":     fac["key"] if fac else "unmapped",
@@ -550,8 +597,8 @@ def extract_findings(notam, band_start, band_end):
                         "mapped":       fac is not None,
                         "runway":       rwy,
                         "matched_text": segment[:120].strip(),
-                        "outcome_b":    fac["b"] if fac else {"kind": "unmapped"},
-                        "outcome_a":    fac["a"] if fac else {"kind": "unmapped"},
+                        "outcome_b":    outcome_b,
+                        "outcome_a":    outcome_a,
                     })
         return out
     except Exception:
