@@ -127,25 +127,45 @@ destination, your alternate, or a field you would only ever see on a diversion.
 
 Only the comparison layered on top is role-dependent:
 
-| Role on that leg | Rule | Required RVR/VIS | Built in v1 |
+| Role on that leg | Rule | Required RVR/VIS | Built |
 |---|---|---|---|
 | `dest_altn` / `era` / `rcf_altn` | §8.1.7.5.2 Table 3 | re-determined base **+ row increment** | **yes** |
-| destination (`dest`, `rcf_dest`) | §8.1.3.2.3 | re-determined base, **no increment**; NPA/circling ceiling above MDH | **deferred** |
+| destination (`dest`, `rcf_dest`) | §8.1.3.2.3 | re-determined base, **no increment** — DH/MDH and RVR/VIS compared directly | **yes** |
 | anything else | none | the re-determined landing minima *is* the answer | n/a — layer 1 only |
 
-**Layer 2's destination variant is deferred out of v1.** Layer 1 renders at a destination like
-anywhere else and is independently correct there — *"your destination's approach lights are
-out, here is your re-determined RVR"* needs no planning rule to be true, and the destination
-is the aerodrome the crew is actually landing at. What layer 2 would add is only the PASS/FAIL
-comparison, and it is a genuinely third arithmetic: `ceiling above MDH` is a strict inequality
-against a different quantity, not `MDH + 0`. Shipping it would also need
-`minima_snapshot.json` extended to destination ICAOs (ADR 0005 §7 snapshots only
-alternate/ERA/`rcf_altn`), which §11 deliberately does not do. A half-specified third rule
-with no snapshot coverage and no test is how a wrong number reaches the aircraft.
+**Amendment — layer 2's destination variant is implemented, closing KNOWN_ISSUES #13.**
+Originally deferred out of v1: layer 1 renders at a destination like anywhere else and is
+independently correct there — *"your destination's approach lights are out, here is your
+re-determined RVR"* needs no planning rule to be true — but what layer 2 would add, the
+PASS/FAIL comparison itself, was treated as a genuinely third arithmetic pending the exact
+OM-A §8.1.3.2.3 wording (a circling/NPA "ceiling above MDH" test against a different
+quantity than Table 3's "MDH + increment"), and shipping a half-specified rule with no
+snapshot coverage and no test was named as exactly how a wrong number reaches the aircraft.
 
-At a destination, layer 2 therefore renders one line — *"destination planning minima
-(§8.1.3.2.3) not computed — compare manually"* — the same graceful-miss shape used everywhere
-else here. Recorded in `docs/KNOWN_ISSUES.md`.
+What shipped is narrower and deliberately reuses layer 2's existing machinery rather than
+adding a second one: **the entered DH/MDH and RVR/VIS are compared directly against the
+applicable forecast, using the identical `>=` verdict `_minimaVerdict()` already applies to
+the alternate/ERA check, with the Table 3 increment pinned to `0` instead of a row's
+`ceiling_ft`/`rvr_vis_m`.** `_minimaCompute()` (`index.html`) is the one function both roles
+call — the destination branch is not a second, hand-written verdict path that could drift
+from the alternate one. This is *not* a claim that it implements the NPA/circling "ceiling
+above MDH" nuance the original table row named; it is the same-shape, zero-margin comparison
+the crew asked for, and is recorded as such rather than overclaiming §8.1.3.2.3 compliance.
+Of the two blockers that justified the original deferral, only one is closed: the snapshot
+gap is — `minima_snapshot.json` is extended to `dest`/`rcf_dest` ICAOs (ADR 0005 §7's
+amendment). The test gap is **not** closed the same way. `tests/test_app_helpers.py::
+TestMinimaApiPartialMerge` covers the `PUT /api/minima/<icao>` merge contract both forms and
+this check depend on — it does not exercise `_minimaCompute`/`_minimaVerdict` or the
+destination arithmetic itself, the number the crew actually reads. This repo has no
+client-side JS test harness (every existing test in `tests/` is Python, exercising pure
+functions or Flask routes), and standing one up for this one function is scope beyond what
+was asked here. `docs/KNOWN_ISSUES.md` #13 says so plainly — open, not closed, specifically
+because the verdict arithmetic is unverified both against a test and against the exact OM-A
+§8.1.3.2.3 wording. Treat that entry, not this paragraph, as the authoritative status.
+
+The destination check is gated identically to the alternate one — see the Planning Minima
+gate amendment in §10 below — rather than always-on, so it does not resurrect the noise §10
+was written to avoid.
 
 The ordering (re-determine, *then* increment) is confirmed by Table 3's own footnotes —
 `* The higher of the usable DA/H or MDA/H`, `** The higher of the usable RVR or VIS` — the
@@ -375,33 +395,60 @@ ADR asserted the opposite; the pipeline order is what settles it.)
 
 ### 10. Surface: two blocks, adjacent, per leg; findings split three ways
 
-**Layer 2 is gated on layer 1.** Planning Minima renders only on a leg that has at least
-one equipment finding — the same gate as the Failed Ground Equipment block, so the two
-appear and disappear together. This **narrows ADR 0005**, which rendered its block
-unconditionally on every `dest_altn`/`era`/`rcf_altn` for every leg as a standing
-§8.1.3.2.4 selectability check. In practice most aerodromes have no hand-entered base
-minima, so that block printed `No entry — Enter minima` on every alternate of every leg and
-the signal drowned in it.
+**Amendment — layer 2's gate is now `wx_tier !== "GREEN" || equipment_findings.length > 0`,
+not layer 1 alone.** Originally Planning Minima rendered only on a leg that had at least one
+equipment finding — the same gate as the Failed Ground Equipment block, so the two appeared
+and disappeared together. This narrowed ADR 0005, which rendered its block unconditionally
+on every `dest_altn`/`era`/`rcf_altn` for every leg as a standing §8.1.3.2.4 selectability
+check; in practice most aerodromes have no hand-entered base minima, so that block printed
+`No entry — Enter minima` on every alternate of every leg and the signal drowned in it
+(KNOWN_ISSUES #16).
 
-The cost is real and accepted rather than overlooked: a weather-marginal alternate with all
-equipment serviceable now shows no PASS/FAIL at all, even though §8.1.3.2.4 applies to it.
-Recorded as KNOWN_ISSUES #16. The gate is two lines at the top of `_minimaBlockHtml`;
-deleting them restores ADR 0005's always-on behaviour. If the always-on check is wanted
-back without the noise, the narrower fix is to suppress only the `No entry` state.
+A weather deterioration is just as much a reason to check planning minima as a failed
+facility — an alternate or destination that has gone YELLOW+ is exactly the moment the crew
+needs this number — so the gate widened to admit either trigger independently. Layer 1's own
+gate (`equipment_findings.length > 0` alone) is untouched; only layer 2's changed. **This
+does not resurrect #16's noise**, because #16's problem was never "the block renders too
+often" — it was that the block, once rendered with nothing on file, could only nag
+(`No entry — Enter minima`, forever, on every alternate of every leg, whether or not
+anything was actually happening). Under the new gate the `No entry` prompt still only ever
+appears at a moment that's actually useful — weather has gone marginal or a facility has
+failed — and it leads straight into the Equipment form that resolves it. KNOWN_ISSUES #16
+is amended to record this, not reverted.
 
 **Two blocks, not one**, mirroring §3's two layers:
 
 - `FAILED GROUND EQUIPMENT · §8.1.3.3.6` — layer 1, renders wherever a finding exists, for
   any airport, with no role gate. It therefore **cannot live behind `_minimaBlockHtml`'s
   opening `if (!_minimaRole(...)) return ""`.**
-- `PLANNING MINIMA` — layer 2, ADR 0005's existing block, unchanged in shape, rendering for
-  `dest_altn`/`era`/`rcf_altn` only (§3 defers the destination variant). Its RVR line
-  consumes layer 1's output with a visible back-reference:
+- `PLANNING MINIMA` — layer 2, rendering for `dest_altn`/`era`/`rcf_altn` (Table 3) **and**,
+  since the amendment above, `dest`/`rcf_dest` (§8.1.3.2.3, zero increment — see §3's
+  amendment). Its RVR line consumes layer 1's output with a visible back-reference:
   `RVR/VIS: 2000 + 1500 = 3500 m required · └ re-determined, SALS RWY 36 U/S ⟩`
 
 Merging them would put an enroute airport's finding inside a block titled "Planning Minima"
 that has no planning rule to apply. The back-reference is what stops two blocks reading as
 unrelated.
+
+**Amendment — the entry form is now two forms, not one.** Originally a single "Aerodrome
+Minima" form (approach + row + DH/MDH + RVR/VIS) was reached from either block's `Edit`/
+`Enter minima` link — titled generically, per this section's original text, precisely
+*because* it was shared. It is now split into an Equipment form (approach + DH/MDH + charted
+RVR/VIS — no row) and a Table 3 row form (row only, alternate/ERA role only); both PUT the
+same store entry via `PUT /api/minima/<icao>`'s partial-merge (app.py), so a row-only save
+can no longer blank the DH/MDH and vice versa. Each `data-minima-action="enter"`/`"save"`
+trigger carries `data-minima-form` (`"equipment"` or `"row"`) so `_handleMinimaAction` opens
+and submits the right one without guessing from which block the click originated.
+
+The alternate/ERA role's computed Planning Minima block carries **both** `Edit row` and
+`Edit minima` links (`_minimaResultHtml`'s `editLinks` array), not one. Under the widened
+gate above, this block can now render with no equipment finding on the leg — meaning the
+Failed Ground Equipment block above it doesn't render either, and with it, its own Edit link
+into the approach/DH/MDH/RVR is gone. A single row-only link at that point would leave the
+DH/MDH permanently unreachable the moment weather alone triggered the block — the same
+"no way back into the form" gap this ADR already fixed once (§10's approach-line note
+above), reopened by this amendment and fixed the same way. Destination's single `Edit` link
+still opens the Equipment form only, since it has no row concept.
 
 Placement: per-leg, inside `legs.forEach`, after the MET rows and immediately before layer 2,
 ahead of the unified NOTAM block — "here is what is broken and what it costs you" before the
@@ -478,16 +525,22 @@ facts about aerodromes and about a regulatory table, not about this flight — t
 
 - the RVR-vs-DH/MDH table (§9), listed in `manifest.json`;
 - the new `approach` field rides inside the existing `minima_snapshot.json` (ADR 0005 §7) with
-  no schema change to the snapshot mechanism, and **no change to which ICAOs it covers** —
-  still alternate/ERA/`rcf_altn` only, which is exactly why §3 defers the destination variant.
+  no schema change to the snapshot mechanism.
 
-A consequence worth stating: layer 1 renders at any airport, but its *arithmetic* needs a
-store entry, and offline that entry comes from the snapshot. So a destination or enroute
-airport with a finding will show the finding and the class downgrade offline but no
-re-determined number, because its minima were never snapshotted. Online it works (the client
-fetches the whole store from `/api/minima`). That online/offline asymmetry is accepted rather
-than engineered around — extending the snapshot to every airport in `airports.json` would bake
-~50 entries into every group dir to serve the handful that ever have one.
+**Amendment:** §7 originally covered alternate/ERA/`rcf_altn` only, which is exactly why this
+ADR's §3 deferred the destination variant — a destination snapshot entry would have had
+nothing to feed. Now that §3 implements the destination check, ADR 0005 §7 is amended to
+snapshot `dest`/`rcf_dest` too, closing that half of the asymmetry below.
+
+A consequence still worth stating: layer 1 renders at any airport, but its *arithmetic* needs
+a store entry, and offline that entry comes from the snapshot. An **enroute contingency**
+airport with a finding (one of the ~40 in `airports.json` with no planning role at all) will
+still show the finding and the class downgrade offline but no re-determined number, because
+its minima were never snapshotted — destination and alternate/ERA are now both covered, only
+this remaining case is not. Online it works everywhere (the client fetches the whole store
+from `/api/minima`). That narrower online/offline asymmetry is accepted rather than
+engineered around — extending the snapshot to every airport in `airports.json` would bake ~50
+entries into every group dir to serve the handful that ever have one.
 
 Findings themselves live in `airports.json`, already precached. `bundle.html` gets whatever
 was baked in at build time, read-only, per ADR 0003's no-fork rule.
@@ -502,12 +555,19 @@ was baked in at build time, read-only, per ADR 0003's no-fork rule.
   `PUT /api/minima/<icao>`; `rvr_table.json` written per group dir alongside
   `minima_snapshot.json` (`_build_manifest` lists it automatically).
 - `index.html` — the layer-1 block outside `_minimaRole`'s gate (§10); the three-way split;
-  the back-reference line in `_minimaBlockHtml`; `_minimaVerdict`/`_worseVerdict` gain
-  `NOT ALLOWED`; `_minimaRole` returns a role rather than a boolean; the entry form gains
-  `approach` and makes `row` optional; a fetch for the RVR table with the 404 fallback.
+  the back-reference line, factored into shared `_minimaCompute`/`_minimaResultHtml`
+  functions both roles call; `_minimaVerdict`/`_worseVerdict` gain `NOT ALLOWED`;
+  `_minimaRole` returns a role rather than a boolean; the entry form gains `approach` and
+  makes `row` optional, then splits into `_equipmentFormHtml`/`_rowFormHtml` (§10 amendment)
+  with `data-minima-form` threading the choice through `_handleMinimaAction`; a fetch for the
+  RVR table with the 404 fallback.
+- `tests/test_app_helpers.py::TestMinimaApiPartialMerge` — the PUT partial-merge contract
+  both split forms and the destination check now depend on.
 - `docs/KNOWN_ISSUES.md` — the circling/Type-A imprecision (§5); net 2's expected first-release
-  noise (§6); the unparsed `"25 0800-1200, 26 0230-1000"` schedule form (§8); the deferred
-  destination layer 2 (§3); the offline-snapshot asymmetry (§11).
+  noise (§6); the unparsed `"25 0800-1200, 26 0230-1000"` schedule form (§8); #13 (destination
+  layer 2) closed per §3's amendment; the offline-snapshot asymmetry (§11) narrowed —
+  destination is now snapshotted per ADR 0005 §7's amendment, so only the enroute-airport
+  asymmetry §11 describes remains.
 - `CONTEXT.md` — new terms: Equipment Finding, Applicable Finding, Class Downgrade,
   Re-determined Minima.
 
@@ -529,12 +589,15 @@ was baked in at build time, read-only, per ADR 0003's no-fork rule.
   precedent, because it discards two published worked examples as regression fixtures.
 - **Net 2 will be noisy on first release.** Tuning it down against the nine fixture NOTAM PDFs
   is expected work, and the correct trade against a silent miss.
-- **Layer 2 no longer renders on its own** (§10). ADR 0005's standing selectability check is
-  now conditional on an equipment finding — a deliberate narrowing for signal, at the cost of
-  losing the PASS/FAIL on a marginal alternate whose equipment is fine (KNOWN_ISSUES #16).
-- **Deferred — layer 2 at the destination** (§3). The aerodrome the crew actually lands at gets
-  the re-determination but not the PASS/FAIL comparison, which is the weakest point of the v1
-  scope and the first thing to revisit. `KNOWN_ISSUES` entry, not a silent omission.
+- **Layer 2's gate widened to `wx_tier !== "GREEN" || equipment_findings.length > 0`** (§10,
+  amended). ADR 0005's standing selectability check is conditional on either trigger, not
+  layer 1 alone — a weather-marginal alternate with serviceable equipment gets its PASS/FAIL
+  back, closing the cost KNOWN_ISSUES #16 originally accepted; #16 itself is amended to
+  record the wider gate rather than reverted, since the "No entry" prompt still never nags
+  outside a moment the gate judged useful.
+- **Closed — layer 2 at the destination** (§3, amended). The aerodrome the crew actually lands
+  at now gets both the re-determination and a PASS/FAIL comparison (zero-margin, reusing the
+  alternate check's own verdict function). `KNOWN_ISSUES` #13 is closed accordingly.
 - **The tile/finding divergence (§8) is visible to the crew** and will look like a bug the
   first time a T3 — or absent — NOTAM moves a required RVR. The inline window/ETA line is the
   mitigation; if it proves confusing in practice, the fix is a better label, not a narrower

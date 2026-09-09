@@ -244,11 +244,20 @@ Unlike `hira.json` (flight-specific, must never cache a negative), aerodrome min
 facts about the airport — safe to precache aggressively. At pipeline time, in the same
 window `_run_source_pane_step()` occupies (after group dirs exist, before
 `_write_manifest()`), the pipeline writes `minima_snapshot.json` into each group dir: the
-current store's entries for that group's `dest_altn`/`era`/`rcf_altn` ICAOs, written
-**unconditionally** — `{}` when none have entries — so the manifest-listed file always
-exists on disk (the failure mode CLAUDE.md warns about for `hira.json`, from the opposite
-direction: a conditionally-written file silently missing under a manifest entry that
-claims it's there). It is listed in `manifest.json` and precached normally.
+current store's entries for that group's `dest_altn`/`era`/`rcf_altn` **and** `dest`/
+`rcf_dest` ICAOs, written **unconditionally** — `{}` when none have entries — so the
+manifest-listed file always exists on disk (the failure mode CLAUDE.md warns about for
+`hira.json`, from the opposite direction: a conditionally-written file silently missing
+under a manifest entry that claims it's there). It is listed in `manifest.json` and
+precached normally.
+
+**Amendment (docs/adr/0006 §3 extension):** originally scoped to alternate/ERA/`rcf_altn`
+only, deliberately excluding the destination — layer 2 wasn't computed there yet, so a
+destination snapshot entry would have had nothing to feed. Now that the destination gets a
+real §8.1.3.2.3 PASS/FAIL (closing KNOWN_ISSUES #13), excluding it would mean that check
+goes silently blank offline — exactly the failure this file exists to prevent for
+alternates. `dest`/`rcf_dest` are folded into the same `role_icaos` set at the pipeline's
+Step 6 call site.
 
 The client prefers a live fetch of the store when online (so an edit made after upload
 still helps that session) and falls back to the snapshot offline. `bundle.html` gets

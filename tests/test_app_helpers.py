@@ -1,6 +1,7 @@
 """Unit tests for app.py pipeline helpers — no PDFs, no API key, no server."""
 from datetime import datetime, timezone
 
+import app as app_module
 from app import (
     _fir_marker_position,
     _is_active_for_flight,
@@ -105,3 +106,84 @@ class TestFirMarkerPosition:
         route = [{"lat": 13.68, "lon": 100.75}]
         airports = [{"lat": 13.68, "lon": 100.75}]
         assert _fir_marker_position(centroid, route, airports) == centroid
+
+
+class TestMinimaApiPartialMerge:
+    """PUT /api/minima/<icao> — index.html's split Equipment form
+    (approach/base_height_ft/base_rvr_vis_m) and Table 3 row form (row only)
+    each PUT only their own field(s); app.py must merge onto whatever the
+    other form already saved, never overwrite it wholesale."""
+
+    def _client(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(app_module, "MINIMA_STORE_PATH", str(tmp_path / "minima.json"))
+        return app_module.app.test_client()
+
+    def test_equipment_form_creates_entry_with_no_row(self, tmp_path, monkeypatch):
+        client = self._client(tmp_path, monkeypatch)
+        r = client.put("/api/minima/VTBU", json={
+            "approach": "VOR DME RWY 36", "base_height_ft": 440, "base_rvr_vis_m": 1500,
+        })
+        assert r.status_code == 200
+        saved = r.get_json()
+        assert saved["approach"] == "VOR DME RWY 36"
+        assert saved["base_height_ft"] == 440
+        assert saved["base_rvr_vis_m"] == 1500
+        assert saved.get("row") is None
+
+    def test_row_only_save_does_not_touch_equipment_fields(self, tmp_path, monkeypatch):
+        client = self._client(tmp_path, monkeypatch)
+        client.put("/api/minima/VTBU", json={
+            "approach": "VOR DME RWY 36", "base_height_ft": 440, "base_rvr_vis_m": 1500,
+        })
+        r = client.put("/api/minima/VTBU", json={"row": 5})
+        assert r.status_code == 200
+        saved = r.get_json()
+        assert saved["row"] == 5
+        assert saved["approach"] == "VOR DME RWY 36"
+        assert saved["base_height_ft"] == 440
+        assert saved["base_rvr_vis_m"] == 1500
+
+    def test_equipment_only_save_does_not_blank_existing_row(self, tmp_path, monkeypatch):
+        client = self._client(tmp_path, monkeypatch)
+        client.put("/api/minima/VTBU", json={
+            "approach": "VOR DME RWY 36", "base_height_ft": 440, "base_rvr_vis_m": 1500,
+        })
+        client.put("/api/minima/VTBU", json={"row": 5})
+        r = client.put("/api/minima/VTBU", json={
+            "approach": "VOR DME RWY 36", "base_height_ft": 460, "base_rvr_vis_m": 1600,
+        })
+        assert r.status_code == 200
+        saved = r.get_json()
+        assert saved["base_height_ft"] == 460
+        assert saved["row"] == 5  # untouched by the equipment-only save
+
+    def test_row_alone_before_any_entry_is_rejected(self, tmp_path, monkeypatch):
+        # The client only ever reaches the row form once base_height_ft/
+        # base_rvr_vis_m already exist (index.html's _handleMinimaAction) —
+        # the API guards it directly rather than trust that ordering.
+        client = self._client(tmp_path, monkeypatch)
+        r = client.put("/api/minima/VTBU", json={"row": 5})
+        assert r.status_code == 400
+
+    def test_row_null_clears_a_stored_row(self, tmp_path, monkeypatch):
+        client = self._client(tmp_path, monkeypatch)
+        client.put("/api/minima/VTBU", json={
+            "approach": "VOR DME RWY 36", "base_height_ft": 440, "base_rvr_vis_m": 1500,
+        })
+        client.put("/api/minima/VTBU", json={"row": 5})
+        r = client.put("/api/minima/VTBU", json={"row": None})
+        assert r.status_code == 200
+        assert r.get_json()["row"] is None
+
+    def test_invalid_row_rejected(self, tmp_path, monkeypatch):
+        client = self._client(tmp_path, monkeypatch)
+        client.put("/api/minima/VTBU", json={
+            "approach": "VOR DME RWY 36", "base_height_ft": 440, "base_rvr_vis_m": 1500,
+        })
+        r = client.put("/api/minima/VTBU", json={"row": 9})
+        assert r.status_code == 400
+
+    def test_empty_body_rejected(self, tmp_path, monkeypatch):
+        client = self._client(tmp_path, monkeypatch)
+        r = client.put("/api/minima/VTBU", json={})
+        assert r.status_code == 400

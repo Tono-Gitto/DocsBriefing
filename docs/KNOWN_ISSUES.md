@@ -3,7 +3,8 @@
 Open problems, unproven claims, and accepted limitations. Close an entry by deleting it in
 the same commit that fixes it.
 
-Last reviewed: 2026-09-08, adding #17 (COM-INFO splitting extended to all NOTAM sections).
+Last reviewed: 2026-09-09, amending #13 (destination planning minima implemented, regulatory
+fidelity unverified) and #16 (Planning Minima gate widened to weather-or-equipment-finding).
 
 | # | Issue | Severity |
 |---|---|---|
@@ -271,19 +272,30 @@ transient-phenomenon TEMPO deterioration as applicable where the fuel-ERA row di
 Nothing currently triggers this; recorded so it isn't rediscovered as a fresh bug the first
 time it does.
 
-## #13 — Destination planning minima (§8.1.3.2.3) are not computed
+## #13 — Destination planning minima (§8.1.3.2.3) — implemented, regulatory fidelity unverified
 
-**Status:** accepted, deferred out of ADR 0006 v1.
+**Status:** open, downgraded from "not computed" to "computed, but not confirmed to match
+OM-A's exact wording" — not closed outright, because the residual risk (a wrong number
+reaching the aircraft) is the same class this ADR was written to avoid.
 
-The failed-equipment feature re-determines *landing* minima at every airport, destination
-included. But the destination's planning check — OM-A §8.1.3.2.3, which uses the approach
-minima with **no** Table 3 increment and tests "ceiling above MDH" rather than
-"MDH + increment" — is not built. A destination shows the Failed Ground Equipment block and
-a Planning Minima block reading `NOT COMPUTED`, never a PASS.
+The destination Planning Minima block now computes a real verdict (`index.html`'s
+`_minimaCompute`, `role === "destination"` branch, docs/adr/0006 §3 amendment) instead of
+rendering `NOT COMPUTED`. `minima_snapshot.json` was extended to `dest`/`rcf_dest` ICAOs
+alongside alternate/ERA/`rcf_altn` (ADR 0005 §7 amendment) so the check also works offline.
 
-It is a third arithmetic, and shipping it also needs `minima_snapshot.json` extended to
-destination ICAOs (ADR 0005 §7 snapshots only alternate/ERA/`rcf_altn`). This is the
-weakest point of ADR 0006's scope and the first thing to revisit.
+**What was implemented, precisely:** the entered DH/MDH and RVR/VIS are compared directly
+against the applicable ETA±1h forecast, `>=` passes, with the Table 3 margin pinned to `0`
+instead of a selected row's increment — the same `_minimaVerdict()` the alternate/ERA check
+uses, not a second hand-written one. Layer 1's re-determined RVR (when a facility is failed)
+feeds in identically to the alternate check.
+
+**What this is not:** OM-A §8.1.3.2.3's exact wording (as understood when this was first
+deferred) tests "ceiling above MDH" for an NPA/circling approach, a comparison against a
+different quantity than Table 3's "MDH + increment". This implementation is the same-shape,
+zero-margin comparison the crew asked for — not a verified implementation of that specific
+NPA/circling nuance. If the exact regulatory text is later obtained and it turns out to
+specify something other than a bare `>=` compare against the entered DH/MDH, this needs a
+second pass, not just a config change.
 
 ## #14 — Two NOTAM schedule forms are unparsed, so their windows read as continuous
 
@@ -326,27 +338,39 @@ All from ADR 0006, all deliberate:
   airport in `airports.json` would bake ~50 entries into every group dir to serve the
   handful that ever have one.
 
-## #16 — Planning Minima only renders where equipment has failed
+## #16 — Planning Minima only renders where equipment has failed OR weather is off-GREEN
 
-**Status:** accepted, deliberate (ADR 0006 §10, narrowing ADR 0005).
+**Status:** amended, deliberate (ADR 0006 §10 amendment, narrowing ADR 0005 less than the
+original v1 gate did).
 
 ADR 0005 rendered the Planning Minima block on every `dest_altn`/`era`/`rcf_altn` for every
 leg — OM-A §8.1.3.2.4's selectability check applies to an alternate whether or not any
-equipment is failed. It is now gated on the leg having at least one §8.1.3.3.6 equipment
-finding, so it appears only alongside the Failed Ground Equipment block.
+equipment is failed. ADR 0006 v1 gated it on the leg having at least one §8.1.3.3.6
+equipment finding, so it appeared only alongside the Failed Ground Equipment block; that
+gate is now widened to `wx_tier !== "GREEN" || equipment_findings.length > 0` — a weather
+deterioration is treated as just as valid a reason to check planning minima as a failed
+facility, and either alone is now sufficient.
 
-**Why:** the base minima are hand-entered and most aerodromes have none, so the block
-printed `No entry for XXXX — Enter minima` on every alternate of every leg. The regulatory
-check was invisible inside its own noise.
+**Why the original gate existed:** the base minima are hand-entered and most aerodromes have
+none, so the always-on block printed `No entry for XXXX — Enter minima` on every alternate of
+every leg regardless of anything happening. The regulatory check was invisible inside its own
+noise.
 
-**What is lost:** a weather-marginal alternate with all equipment serviceable now shows no
-PASS/FAIL. That is the majority case, and it is a genuine regression against §8.1.3.2.4 —
-recorded rather than hidden.
+**Why widening it doesn't reintroduce that noise:** the noise problem was never "the block
+renders too often" — it was that a rendered block with nothing on file could only ever nag.
+Under the new gate, the `No entry` prompt still only appears at a moment the tool judged
+actually useful (weather has gone marginal, or a facility has failed), never unconditionally,
+and it opens straight into the Equipment form that resolves it.
 
-**Restoring it:** delete the two-line `equipment_findings` gate at the top of
-`_minimaBlockHtml` in `index.html`. A middle option, if the noise is the real problem rather
-than the block itself, is to suppress only the `No entry` state and keep the block wherever
-minima have actually been entered.
+**What is still lost, narrower than before:** a *clean-weather* alternate with all equipment
+serviceable still shows no PASS/FAIL — §8.1.3.2.4 technically applies there too. That is the
+remaining accepted gap; the majority-case gap (any weather-marginal alternate/destination
+with no equipment failure) is closed.
+
+**Restoring the full always-on check:** delete the `weatherTriggered ||` half of the
+condition at the top of `_minimaBlockHtml` in `index.html`, reducing it back to the
+findings-only gate; deleting the whole condition restores ADR 0005's fully always-on
+behaviour and its original noise.
 
 ---
 

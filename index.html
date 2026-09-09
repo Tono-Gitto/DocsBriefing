@@ -1965,13 +1965,15 @@ function _eqpEffect(findings, entry) {
       continue;
     }
     if (o.kind === "not_allowed") { eff.stops.push({ f, o }); continue; }
-    // Unreachable while a store entry always carries base_height_ft (the PUT
-    // requires it), so `type` is non-null whenever `entry` exists — and both
-    // callers require `entry`. Handled anyway: a hand-edited store file could
-    // reach it, and falling through every branch would leave eff.rvr at the
-    // charted value, printing a normal PASS beside layer 1's "effect depends on
-    // approach type". That is the same naked-PASS failure the `stop` verdict
-    // and the conditional qualifier both exist to prevent.
+    // Unreachable in practice: base_height_ft/base_rvr_vis_m are always saved
+    // together by the Equipment form (index.html), and app.py's PUT rejects a
+    // row-only save until both already exist on file — so any entry reaching
+    // here carries base_height_ft, meaning `type` is non-null whenever `entry`
+    // exists, and both callers require `entry`. Handled anyway: a hand-edited
+    // store file could reach it, and falling through every branch would leave
+    // eff.rvr at the charted value, printing a normal PASS beside layer 1's
+    // "effect depends on approach type". That is the same naked-PASS failure
+    // the `stop` verdict and the conditional qualifier both exist to prevent.
     if (o.kind === "needs_type" || o.kind === "unmapped") { eff.unresolved = true; continue; }
     if (o.kind === "class") {
       const v = _rvrLookup(entry && entry.base_height_ft, o.class);
@@ -2039,7 +2041,7 @@ function _equipmentBlockHtml(ap, leg, metAttr) {
     ? `<div class="eqp-approach">${entry.approach ? esc(entry.approach) : "No planned approach recorded"}${
         entry.base_height_ft !== null && entry.base_height_ft !== undefined
           ? ` · DH/MDH ${entry.base_height_ft} ft${type ? ` · Type ${type}` : ""}` : ""}
-        <span class="minima-edit" data-minima-action="enter" data-minima-icao="${esc(ap.icao)}">Edit</span></div>`
+        <span class="minima-edit" data-minima-action="enter" data-minima-form="equipment" data-minima-icao="${esc(ap.icao)}">Edit</span></div>`
     : "";
 
   let body = "";
@@ -2053,7 +2055,7 @@ function _equipmentBlockHtml(ap, leg, metAttr) {
     calc = `<div class="eqp-calc"><span class="lbl">RVR cannot be re-determined without the
       planned approach's DH/MDH.</span></div>
       <div class="minima-row" style="margin-top:6px">
-        <span class="minima-enter" data-minima-action="enter" data-minima-icao="${esc(ap.icao)}">Enter DH/MDH</span>
+        <span class="minima-enter" data-minima-action="enter" data-minima-form="equipment" data-minima-icao="${esc(ap.icao)}">Enter DH/MDH</span>
       </div>`;
   } else if (applicable.length && eff.rvr === null) {
     const why = !_rvrTable
@@ -2097,7 +2099,7 @@ function _equipmentBlockHtml(ap, leg, metAttr) {
          ${other.map(f => _eqpFindingHtml(f, type, anchorFor(f))).join("")}
          ${!apRwy ? `<div class="eqp-note">No planned approach recorded for ${esc(ap.icao)}, so none of
             these can be matched to one and no RVR is re-determined.
-            <span class="minima-enter" data-minima-action="enter" data-minima-icao="${esc(ap.icao)}">${
+            <span class="minima-enter" data-minima-action="enter" data-minima-form="equipment" data-minima-icao="${esc(ap.icao)}">${
               entry ? "Add the planned approach" : "Enter minima"}</span></div>` : ""}
        </div>`
     : "";
@@ -2149,50 +2151,110 @@ function _eqpRedetermined(ap, leg) {
   };
 }
 
+// Shared re-determined-base + verdict arithmetic for BOTH Planning Minima
+// roles (docs/adr/0006 §3, extended to compute the destination branch rather
+// than stub it — closes KNOWN_ISSUES #13). Table 3's increment applies to the
+// USABLE aerodrome operating minima (its own footnotes: "* the higher of the
+// usable DA/H or MDA/H", "** the higher of the usable RVR or VIS"), which is
+// exactly what §8.1.3.3.6 revises — so the re-determination happens BEFORE
+// the increment, for either role. §8.1.5.1 corroborates: applicable minima
+// are the highest of AIP / Lido / CCI / NOTAM restrictions. The destination
+// branch (§8.1.3.2.3) passes ceilingIncrement/visIncrement as 0 — same
+// comparison, same >= verdict, no Table 3 margin — rather than a second
+// verdict function, so the two roles can never drift apart on how a PASS is
+// decided.
+function _minimaCompute(ap, leg, entry, ceilingIncrement, visIncrement) {
+  const redet = _eqpRedetermined(ap, leg);
+  const baseVis = (redet && redet.rvr !== null && redet.rvr !== undefined)
+    ? redet.rvr : entry.base_rvr_vis_m;
+  const visUnresolved = !!(redet && redet.rvr === null);
+
+  const reqCeiling = entry.base_height_ft + ceilingIncrement;
+  const reqVis     = visUnresolved ? null : baseVis + visIncrement;
+  const ceilingVerdict = _minimaVerdict(leg.applicable_ceiling_ft, leg.ceiling_indeterminate, reqCeiling);
+  const visVerdict     = _minimaVerdict(leg.applicable_vis_m, leg.vis_indeterminate, reqVis);
+  // A §8.1.3.3.6 NOT ALLOWED dominates any numeric verdict (docs/adr/0006 §7).
+  const overall = (redet && redet.stop)
+    ? "stop" : _worseVerdict(ceilingVerdict, visVerdict);
+
+  return { redet, baseVis, visUnresolved, reqCeiling, reqVis, ceilingVerdict, visVerdict, overall };
+}
+
+// Renders a computed Planning Minima block — identical shape for both roles,
+// parameterised on the increment (0 for destination) and which form Edit
+// re-opens (row form for the alternate/ERA role, since its own DH/MDH/RVR
+// live in the Equipment form already; the Equipment form itself for
+// destination, which has no row concept to edit).
+// `editLinks`: [{label, form}, ...] — the table3 role needs BOTH a way back
+// into the row form and a way back into the Equipment form, because under
+// the weather-only trigger (no equipment finding) the Failed Ground
+// Equipment block above doesn't render at all, so its own Edit link isn't
+// there to reach the DH/MDH/approach either — the same "no way back into the
+// form" gap ADR 0006 already fixed once on the Equipment block's side (see
+// its approachLine comment), now mirrored here. Destination passes a single
+// link (Equipment form only, since it has no row concept).
+function _minimaResultHtml(ap, leg, entry, c, ceilingIncrement, visIncrement, roleLine, editLinks, disregardedHtml, metAttr) {
+  const ceilingText = leg.ceiling_indeterminate ? "cannot determine"
+    : leg.applicable_ceiling_ft === null ? "unrestricted" : `${leg.applicable_ceiling_ft} ft`;
+  const visText = leg.vis_indeterminate ? "cannot determine"
+    : leg.applicable_vis_m === null ? "unrestricted" : `${leg.applicable_vis_m} m`;
+
+  // Back-reference: when layer 1 moved the base, the RVR line says which NOTAM
+  // did it, so a required figure can always be traced (docs/adr/0006 §10).
+  const backref = (c.redet && c.redet.driver && c.baseVis !== entry.base_rvr_vis_m)
+    ? `<div class="eqp-backref">└ re-determined from ${entry.base_rvr_vis_m} m — ${esc(c.redet.driver.label)}${
+        c.redet.driver.runway ? " RWY " + esc(c.redet.driver.runway) : ""} U/S, ${esc(c.redet.driver.notam_id || "")}</div>`
+    : "";
+  // The verdict above is the branch this tool CAN evaluate; say so explicitly
+  // rather than letting a bare PASS sit beside layer 1's "Night: NOT ALLOWED".
+  const condStopLine = (c.redet && c.redet.condStop && c.redet.condStop.length)
+    ? `<div class="minima-row eqp-cond">${c.redet.condStop.map(cs =>
+        `${esc(cs.when)}: approach not available — ${esc(cs.f.label)}${
+          cs.f.runway ? " RWY " + esc(cs.f.runway) : ""} U/S, ${esc(cs.f.notam_id || "")}`
+      ).join("<br>")}<br>The verdict above applies to the other branch only.</div>`
+    : "";
+  const visLine = c.visUnresolved
+    ? `<div class="minima-row">RVR/VIS: <span class="req">cannot determine</span> — equipment failure could not be re-determined</div>`
+    : `<div class="minima-row">RVR/VIS: <span class="req">${c.baseVis} + ${visIncrement} = ${c.reqVis} m required</span> — forecast ${esc(visText)}</div>${backref}`;
+
+  return `<div class="panel-section met-row minima-block"${metAttr}>
+    <div class="panel-label">Planning Minima
+      <span class="minima-verdict ${_MINIMA_VERDICT_CLASS[c.overall]}">${_MINIMA_VERDICT_LABEL[c.overall]}</span>
+    </div>
+    ${roleLine}
+    <div class="minima-row">Ceiling: <span class="req">${entry.base_height_ft} + ${ceilingIncrement} = ${c.reqCeiling} ft required</span> — forecast ${esc(ceilingText)}</div>
+    ${visLine}${condStopLine}
+    <div class="minima-source">Source: ${esc(leg.ceiling_source || leg.vis_source || "baseline")}</div>
+    <div class="minima-row" style="margin-top:6px">
+      ${editLinks.map(el => `<span class="minima-edit" data-minima-action="enter" data-minima-form="${el.form}" data-minima-icao="${esc(ap.icao)}">${esc(el.label)}</span>`).join(" · ")}
+    </div>
+    ${disregardedHtml}
+  </div>`;
+}
+
 function _minimaBlockHtml(ap, leg, metAttr) {
   const role = _minimaRole(ap.icao, leg.leg);
   if (!role) return "";
 
-  // Layer 2 is PAIRED with layer 1: no equipment finding on this leg, no
-  // Planning Minima block. The same gate _equipmentBlockHtml uses, so the two
-  // appear and disappear together.
+  // Unified trigger (docs/adr/0006 §3 extension): a weather deterioration is
+  // just as much a reason to check planning minima as a failed facility is —
+  // an alternate/destination that has gone YELLOW+ is exactly the moment the
+  // crew needs this number, not only when a NOTAM also happens to have
+  // fired. Failed Ground Equipment's own gate (leg.equipment_findings.length)
+  // is untouched above — it is role-independent and answers a different
+  // question (re-determined landing minima, not a planning margin).
   //
-  // This deliberately narrows ADR 0005. Its block was a standing §8.1.3.2.4
-  // selectability check on every alternate/ERA on every leg — correct in
-  // regulation, but in practice most aerodromes have no hand-entered base
-  // minima, so it rendered "No entry — Enter minima" on every alternate of
-  // every leg and the signal drowned. Gating it on an actual equipment finding
-  // means it appears when a NOTAM has changed something and is otherwise silent.
-  //
-  // The cost, stated so nobody rediscovers it as a bug: a weather-marginal
-  // alternate with all equipment serviceable now shows no PASS/FAIL. Deleting
-  // these two lines restores ADR 0005's original always-on behaviour.
-  if (!(leg.equipment_findings || []).length) return "";
+  // This is wider than ADR 0006 §10's original findings-only gate, so the
+  // "No entry" prompt below can now fire on weather alone too. That is
+  // deliberate, not a return of KNOWN_ISSUES #16's noise: #16 was about a
+  // block that could never do anything but nag ("No entry" on every alternate
+  // of every leg, always, entry or not). Here the prompt only ever appears at
+  // the moment it's actually useful — weather has gone marginal or a facility
+  // has failed — and it leads straight to the form that resolves it.
+  const weatherTriggered = leg.wx_tier && leg.wx_tier !== "GREEN";
+  const hasFinding = !!(leg.equipment_findings || []).length;
+  if (!weatherTriggered && !hasFinding) return "";
 
-  // §8.1.3.2.3's destination rule is deferred out of v1 (docs/adr/0006 §3):
-  // no increment, and "ceiling above MDH" is a strict inequality against a
-  // different quantity than Table 3's "MDH + increment". Rendering it as
-  // "Row —, +0" would invite the crew to read Table 3 as applying here.
-  // Layer 1 above still gives the destination its re-determined landing
-  // minima, which is the half that does not depend on this rule.
-  if (role === "destination") {
-    return `<div class="panel-section met-row minima-block"${metAttr}>
-      <div class="panel-label">Planning Minima
-        <span class="minima-verdict minima-unknown">NOT COMPUTED</span>
-      </div>
-      <div class="minima-row">Destination planning minima (OM-A §8.1.3.2.3) are not computed by
-        this tool — compare the forecast against the approach minima manually.</div>
-    </div>`;
-  }
-
-  // A store entry missing either number is treated as no entry at all. The PUT
-  // requires both, so this only happens to a hand-edited or partly-written
-  // store file — but the arithmetic below is unguarded addition, and rendering
-  // "undefined + 400 = NaN ft required" is strictly worse than asking for the
-  // numbers again.
-  const stored = _minimaStore[ap.icao];
-  const entry = (stored && Number.isFinite(stored.base_height_ft)
-                        && Number.isFinite(stored.base_rvr_vis_m)) ? stored : null;
   const disregarded = leg.disregarded || [];
   const disregardId = `minima-disr-${esc(ap.icao)}-${leg.leg}`;
   const disregardedHtml = disregarded.length
@@ -2202,108 +2264,108 @@ function _minimaBlockHtml(ap, leg, metAttr) {
        </div>`
     : "";
 
+  // A store entry missing either number is treated as no entry at all. The PUT
+  // requires both together, so this only happens to a hand-edited or partly-
+  // written store file — but the arithmetic below is unguarded addition, and
+  // rendering "undefined + 400 = NaN ft required" is strictly worse than
+  // asking for the numbers again. "Enter minima" always opens the Equipment
+  // form — DH/MDH + RVR are the prerequisite for BOTH roles, and (for the
+  // alternate/ERA role) for the row form ever becoming reachable at all.
+  const stored = _minimaStore[ap.icao];
+  const entry = (stored && Number.isFinite(stored.base_height_ft)
+                        && Number.isFinite(stored.base_rvr_vis_m)) ? stored : null;
   if (!entry) {
     return `<div class="panel-section met-row minima-block"${metAttr}>
       <div class="panel-label">Planning Minima</div>
       <div class="no-data">No entry for ${esc(ap.icao)} —
-        <span class="minima-enter" data-minima-action="enter" data-minima-icao="${esc(ap.icao)}">Enter minima</span>
+        <span class="minima-enter" data-minima-action="enter" data-minima-form="equipment" data-minima-icao="${esc(ap.icao)}">Enter minima</span>
       </div>
       ${disregardedHtml}
     </div>`;
   }
 
-  // Table 3 needs a row, and `row` is optional in the store since docs/adr/0006
-  // §4 (an enroute aerodrome can hold a DH/MDH with no planning role). Where a
-  // role DOES exist the row is required — say so rather than defaulting to
-  // row 1 and silently computing the most permissive increment in the table.
+  if (role === "destination") {
+    // §8.1.3.2.3: re-determined base only, no Table 3 margin — closes
+    // KNOWN_ISSUES #13. Same comparison shape and >= verdict as the alternate
+    // check (_minimaCompute), with both increments pinned to 0, so the two
+    // roles share one verdict function rather than a second hand-written one.
+    const c = _minimaCompute(ap, leg, entry, 0, 0);
+    return _minimaResultHtml(ap, leg, entry, c, 0, 0,
+      `<div class="minima-row">Destination (OM-A §8.1.3.2.3) — DH/MDH and RVR/VIS compared directly, no Table 3 margin</div>`,
+      [{ label: "Edit", form: "equipment" }], disregardedHtml, metAttr);
+  }
+
+  // role === "table3": dest_altn / era / rcf_altn — OM-A §8.1.7.5.2 Table 3.
+  // `row` is optional in the store since docs/adr/0006 §4 (an enroute
+  // aerodrome can hold a DH/MDH with no planning role). Where a role DOES
+  // exist the row is required — say so rather than defaulting to row 1 and
+  // silently computing the most permissive increment in the table.
   const row = MINIMA_TABLE3.find(r => r.row === entry.row);
   if (!row) {
     return `<div class="panel-section met-row minima-block"${metAttr}>
       <div class="panel-label">Planning Minima</div>
       <div class="no-data">No Table 3 row recorded for ${esc(ap.icao)} —
-        <span class="minima-enter" data-minima-action="enter" data-minima-icao="${esc(ap.icao)}">Enter minima</span>
+        <span class="minima-enter" data-minima-action="enter" data-minima-form="row" data-minima-icao="${esc(ap.icao)}">Enter minima</span>
+      </div>
+      <div class="minima-row" style="margin-top:6px">
+        <span class="minima-edit" data-minima-action="enter" data-minima-form="equipment" data-minima-icao="${esc(ap.icao)}">Edit DH/MDH</span>
       </div>
       ${disregardedHtml}
     </div>`;
   }
 
-  // Table 3's increment applies to the USABLE aerodrome operating minima
-  // (its own footnotes: "* the higher of the usable DA/H or MDA/H",
-  // "** the higher of the usable RVR or VIS"), which is exactly what
-  // §8.1.3.3.6 revises — so the re-determination happens BEFORE the increment.
-  // §8.1.5.1 corroborates: applicable minima are the highest of AIP / Lido /
-  // CCI / NOTAM restrictions.
-  const redet = _eqpRedetermined(ap, leg);
-  const baseVis = (redet && redet.rvr !== null && redet.rvr !== undefined)
-    ? redet.rvr : entry.base_rvr_vis_m;
-  const visUnresolved = !!(redet && redet.rvr === null);
-
-  const reqCeiling = entry.base_height_ft + row.ceiling_ft;
-  const reqVis     = visUnresolved ? null : baseVis + row.rvr_vis_m;
-  const ceilingVerdict = _minimaVerdict(leg.applicable_ceiling_ft, leg.ceiling_indeterminate, reqCeiling);
-  const visVerdict     = _minimaVerdict(leg.applicable_vis_m, leg.vis_indeterminate, reqVis);
-  // A §8.1.3.3.6 NOT ALLOWED dominates any numeric verdict (docs/adr/0006 §7).
-  const overall = (redet && redet.stop)
-    ? "stop" : _worseVerdict(ceilingVerdict, visVerdict);
-
-  const ceilingText = leg.ceiling_indeterminate ? "cannot determine"
-    : leg.applicable_ceiling_ft === null ? "unrestricted" : `${leg.applicable_ceiling_ft} ft`;
-  const visText = leg.vis_indeterminate ? "cannot determine"
-    : leg.applicable_vis_m === null ? "unrestricted" : `${leg.applicable_vis_m} m`;
-
-  // Back-reference: when layer 1 moved the base, the RVR line says which NOTAM
-  // did it, so a required figure can always be traced (docs/adr/0006 §10).
-  const backref = (redet && redet.driver && baseVis !== entry.base_rvr_vis_m)
-    ? `<div class="eqp-backref">└ re-determined from ${entry.base_rvr_vis_m} m — ${esc(redet.driver.label)}${
-        redet.driver.runway ? " RWY " + esc(redet.driver.runway) : ""} U/S, ${esc(redet.driver.notam_id || "")}</div>`
-    : "";
-  // The verdict above is the branch this tool CAN evaluate; say so explicitly
-  // rather than letting a bare PASS sit beside layer 1's "Night: NOT ALLOWED".
-  const condStopLine = (redet && redet.condStop && redet.condStop.length)
-    ? `<div class="minima-row eqp-cond">${redet.condStop.map(c =>
-        `${esc(c.when)}: approach not available — ${esc(c.f.label)}${
-          c.f.runway ? " RWY " + esc(c.f.runway) : ""} U/S, ${esc(c.f.notam_id || "")}`
-      ).join("<br>")}<br>The verdict above applies to the other branch only.</div>`
-    : "";
-  const visLine = visUnresolved
-    ? `<div class="minima-row">RVR/VIS: <span class="req">cannot determine</span> — equipment failure could not be re-determined</div>`
-    : `<div class="minima-row">RVR/VIS: <span class="req">${baseVis} + ${row.rvr_vis_m} = ${reqVis} m required</span> — forecast ${esc(visText)}</div>${backref}`;
-
-  return `<div class="panel-section met-row minima-block"${metAttr}>
-    <div class="panel-label">Planning Minima
-      <span class="minima-verdict ${_MINIMA_VERDICT_CLASS[overall]}">${_MINIMA_VERDICT_LABEL[overall]}</span>
-    </div>
-    <div class="minima-row">Row ${row.row} — ${esc(row.label)}</div>
-    <div class="minima-row">Ceiling: <span class="req">${entry.base_height_ft} + ${row.ceiling_ft} = ${reqCeiling} ft required</span> — forecast ${esc(ceilingText)}</div>
-    ${visLine}${condStopLine}
-    <div class="minima-source">Source: ${esc(leg.ceiling_source || leg.vis_source || "baseline")}</div>
-    <div class="minima-row" style="margin-top:6px">
-      <span class="minima-edit" data-minima-action="enter" data-minima-icao="${esc(ap.icao)}">Edit</span>
-    </div>
-    ${disregardedHtml}
-  </div>`;
+  // Table3's own Edit needs BOTH links, not just the row — under a weather-
+  // only trigger (no equipment finding) the Failed Ground Equipment block
+  // above doesn't render, so its Edit link isn't there to reach the stored
+  // approach/DH/MDH/RVR either.
+  const c = _minimaCompute(ap, leg, entry, row.ceiling_ft, row.rvr_vis_m);
+  return _minimaResultHtml(ap, leg, entry, c, row.ceiling_ft, row.rvr_vis_m,
+    `<div class="minima-row">Row ${row.row} — ${esc(row.label)}</div>`,
+    [{ label: "Edit row", form: "row" }, { label: "Edit minima", form: "equipment" }],
+    disregardedHtml, metAttr);
 }
 
-function _minimaFormHtml(icao, entry) {
-  const rowOptions = MINIMA_TABLE3.map(r =>
-    `<option value="${r.row}" ${entry && entry.row === r.row ? "selected" : ""}>Row ${r.row} — ${esc(r.label)}</option>`
-  ).join("");
-  // "Aerodrome Minima", not "Planning Minima": since docs/adr/0006 this one
-  // entry feeds BOTH blocks, and the form is reached from the Failed Ground
-  // Equipment block too (its `.minima-block` class is what el.closest() finds).
-  // Titling it "Planning Minima" there labelled the form after the wrong block.
+// Two separate forms, not one shared "Aerodrome Minima" form — Failed Ground
+// Equipment and Planning Minima answer different questions (docs/adr/0006 §3
+// — role-independent re-determination vs. role-dependent planning margin)
+// and each form now only ever touches the field(s) its own block owns. Both
+// still read/write the same per-ICAO store entry via PUT's partial-merge
+// (app.py's put_minima_entry) — this is a UI/API split, not a data split.
+
+// Equipment form: approach + DH/MDH + charted RVR/VIS. Opened from the Failed
+// Ground Equipment block, and from Planning Minima's "No entry" prompt for
+// EITHER role — these three numbers are the prerequisite for both roles, and
+// for the alternate/ERA row form ever becoming reachable at all (see
+// _handleMinimaAction's "enter" branch).
+function _equipmentFormHtml(icao, entry) {
   return `<div class="panel-label">Aerodrome Minima — ${esc(icao)}</div>
     <div class="minima-form">
       <label>Planned approach — the runway designator is matched against equipment NOTAMs (§8.1.3.3.6)</label>
       <input type="text" data-minima-field="approach" value="${entry && entry.approach ? esc(entry.approach) : ""}" placeholder="e.g. VOR DME RWY 36">
-      <label>Table 3 row — leave blank if this aerodrome is not an alternate/ERA</label>
-      <select data-minima-field="row"><option value="">— none —</option>${rowOptions}</select>
       <label>Base ceiling — DH/MDH, height above the aerodrome (ft). Not DA/MDA.</label>
-      <input type="number" data-minima-field="base_height_ft" value="${entry ? entry.base_height_ft : ""}" placeholder="e.g. 200">
+      <input type="number" data-minima-field="base_height_ft" value="${entry && Number.isFinite(entry.base_height_ft) ? entry.base_height_ft : ""}" placeholder="e.g. 200">
       <label>Base RVR/VIS (m)</label>
-      <input type="number" data-minima-field="base_rvr_vis_m" value="${entry ? entry.base_rvr_vis_m : ""}" placeholder="e.g. 550">
+      <input type="number" data-minima-field="base_rvr_vis_m" value="${entry && Number.isFinite(entry.base_rvr_vis_m) ? entry.base_rvr_vis_m : ""}" placeholder="e.g. 550">
       <div class="minima-form-actions">
-        <button type="button" class="minima-save" data-minima-action="save" data-minima-icao="${esc(icao)}">Save</button>
+        <button type="button" class="minima-save" data-minima-action="save" data-minima-form="equipment" data-minima-icao="${esc(icao)}">Save</button>
+        <button type="button" class="minima-cancel" data-minima-action="cancel">Cancel</button>
+      </div>
+    </div>`;
+}
+
+// Row form: Table 3 row only. Opened from the alternate/ERA Planning Minima
+// block only — a destination has no row concept (§8.1.3.2.3 applies no Table
+// 3 margin), so this form is never reached from that role.
+function _rowFormHtml(icao, entry) {
+  const rowOptions = MINIMA_TABLE3.map(r =>
+    `<option value="${r.row}" ${entry && entry.row === r.row ? "selected" : ""}>Row ${r.row} — ${esc(r.label)}</option>`
+  ).join("");
+  return `<div class="panel-label">Table 3 Row (OM-A §8.1.7.5.2) — ${esc(icao)}</div>
+    <div class="minima-form">
+      <label>Table 3 row — the usable-approach count/category this alternate/ERA qualifies under</label>
+      <select data-minima-field="row"><option value="">— none —</option>${rowOptions}</select>
+      <div class="minima-form-actions">
+        <button type="button" class="minima-save" data-minima-action="save" data-minima-form="row" data-minima-icao="${esc(icao)}">Save</button>
         <button type="button" class="minima-cancel" data-minima-action="cancel">Cancel</button>
       </div>
     </div>`;
@@ -2338,7 +2400,17 @@ function _handleMinimaAction(el) {
     const block = el.closest(".minima-block");
     if (!block) return;
     const icao = el.dataset.minimaIcao;
-    block.innerHTML = _minimaFormHtml(icao, _minimaStore[icao]);
+    // Which form opens rides on the trigger's own data-minima-form, set at
+    // every call site above ("equipment" for Failed Ground Equipment's links
+    // and Planning Minima's "No entry" prompt on both roles; "row" only for
+    // the alternate/ERA role's "No Table 3 row recorded" prompt and its Edit
+    // link) — never guessed from which block .closest() found, since the
+    // Equipment form's own Edit link also lives inside a Planning Minima
+    // block's DOM subtree at the destination role.
+    const formKind = el.dataset.minimaForm || "equipment";
+    block.innerHTML = formKind === "row"
+      ? _rowFormHtml(icao, _minimaStore[icao])
+      : _equipmentFormHtml(icao, _minimaStore[icao]);
     return;
   }
 
@@ -2352,20 +2424,31 @@ function _handleMinimaAction(el) {
   if (action === "save") {
     const block = el.closest(".minima-block");
     if (!block) return;
-    const icao       = el.dataset.minimaIcao;
-    const rowRaw     = block.querySelector('[data-minima-field="row"]').value;
-    const row        = rowRaw === "" ? null : parseInt(rowRaw, 10);
-    const approach   = block.querySelector('[data-minima-field="approach"]').value;
-    const baseHeight = parseFloat(block.querySelector('[data-minima-field="base_height_ft"]').value);
-    const baseVis    = parseFloat(block.querySelector('[data-minima-field="base_rvr_vis_m"]').value);
-    if (!Number.isFinite(baseHeight) || !Number.isFinite(baseVis)) {
-      _minimaFormError(block, "Enter both base ceiling and base RVR/VIS.");
-      return;
+    const icao = el.dataset.minimaIcao;
+    const formKind = el.dataset.minimaForm || "equipment";
+
+    // Each form PUTs only its own field(s) — app.py's put_minima_entry merges
+    // onto whatever the other form already saved, so a row-only save can
+    // never blank the DH/MDH/RVR, and vice versa.
+    let body;
+    if (formKind === "row") {
+      const rowRaw = block.querySelector('[data-minima-field="row"]').value;
+      body = { row: rowRaw === "" ? null : parseInt(rowRaw, 10) };
+    } else {
+      const approach   = block.querySelector('[data-minima-field="approach"]').value;
+      const baseHeight = parseFloat(block.querySelector('[data-minima-field="base_height_ft"]').value);
+      const baseVis    = parseFloat(block.querySelector('[data-minima-field="base_rvr_vis_m"]').value);
+      if (!Number.isFinite(baseHeight) || !Number.isFinite(baseVis)) {
+        _minimaFormError(block, "Enter both base ceiling and base RVR/VIS.");
+        return;
+      }
+      body = { approach, base_height_ft: baseHeight, base_rvr_vis_m: baseVis };
     }
+
     fetch(`/api/minima/${icao}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ row, approach, base_height_ft: baseHeight, base_rvr_vis_m: baseVis }),
+      body: JSON.stringify(body),
     })
       .then(r => r.ok ? r.json() : Promise.reject(new Error("save failed")))
       .then(saved => {

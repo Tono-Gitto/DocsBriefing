@@ -272,14 +272,22 @@ def _read_minima_store():
         return {}
 
 
-def _write_minima_entry(icao, entry):
-    """Read-modify-write a single ICAO's entry against the whole store file.
-    Locked and read-modify-write (not a wholesale client-held overwrite)
-    because a 3–4 leg upload opens two map tabs on one run, and either could
-    edit a different ICAO concurrently — the identical reasoning ADR 0004 §2
-    gives for tier-override writes."""
+def _write_minima_entry(icao, patch):
+    """Merge `patch` into ICAO's stored entry and persist, one lock
+    acquisition covering the read and the write so a concurrent PUT can't
+    interleave between them. Locked and read-modify-write (not a wholesale
+    client-held overwrite) because a 3–4 leg upload opens two map tabs on one
+    run, and either could edit a different ICAO concurrently — the identical
+    reasoning ADR 0004 §2 gives for tier-override writes.
+
+    `patch` carries only the fields this write is changing — the split
+    Equipment form (approach/base_height_ft/base_rvr_vis_m) and Table 3 row
+    form (row only) each PUT only their own fields, so this merges onto
+    whatever the other form already saved rather than overwriting it."""
     with _minima_lock:
         store = _read_minima_store()
+        entry = dict(store.get(icao) or {})
+        entry.update(patch)
         store[icao] = entry
         os.makedirs(os.path.dirname(MINIMA_STORE_PATH), exist_ok=True)
         tmp_path = MINIMA_STORE_PATH + ".tmp"
@@ -290,9 +298,9 @@ def _write_minima_entry(icao, entry):
 
 
 def _minima_snapshot_for(icaos):
-    """The subset of the live store relevant to one group's alternate/ERA
-    ICAOs, for minima_snapshot.json (docs/adr/0005 §7) — safe to precache
-    aggressively since these are aerodrome facts, not flight data."""
+    """The subset of the live store relevant to one group's alternate/ERA/
+    destination ICAOs, for minima_snapshot.json (docs/adr/0005 §7) — safe to
+    precache aggressively since these are aerodrome facts, not flight data."""
     store = _read_minima_store()
     return {icao: store[icao] for icao in icaos if icao in store}
 
@@ -889,18 +897,27 @@ def _run_pipeline(run_id, ofp_paths, met_path, notam_path):
             with open(os.path.join(group_dir, "flight_info.json"), "w") as f:
                 json.dump(fi_out, f, indent=2)
 
-            # Alternate/ERA planning-minima snapshot (docs/adr/0005 §7) — this
-            # group's alternate/ERA ICAOs' entries from the live store, written
-            # unconditionally (even {}) so the file the manifest lists always
-            # exists on disk. Aerodrome minima are facts about the airport, not
-            # the flight, so — unlike hira.json — precaching them offline is
-            # safe; this file is deliberately not in _MANIFEST_EXCLUDE.
+            # Alternate/ERA/destination planning-minima snapshot (docs/adr/0005
+            # §7, extended by the §8.1.3.2.3 destination check) — this group's
+            # dest_altn/era/rcf_altn AND dest/rcf_dest ICAOs' entries from the
+            # live store, written unconditionally (even {}) so the file the
+            # manifest lists always exists on disk. Destination is included
+            # because the Planning Minima block now computes a real PASS/FAIL
+            # there too, not just at alternates — without it, that check goes
+            # blank the moment the device is offline. Aerodrome minima are
+            # facts about the airport, not the flight, so — unlike hira.json —
+            # precaching them offline is safe; this file is deliberately not
+            # in _MANIFEST_EXCLUDE.
             role_icaos = set()
             for ld in leg_data:
                 fi = ld["flight_info"]
                 role_icaos.update(fi.get("dest_altn") or [])
                 role_icaos.update(fi.get("era") or [])
                 role_icaos.update(fi.get("rcf_altn") or [])
+                if fi.get("dest"):
+                    role_icaos.add(fi["dest"])
+                if fi.get("rcf_dest"):
+                    role_icaos.add(fi["rcf_dest"])
             with open(os.path.join(group_dir, "minima_snapshot.json"), "w") as f:
                 json.dump(_minima_snapshot_for(role_icaos), f, indent=2)
 
@@ -1108,55 +1125,79 @@ def get_minima_store():
 
 @app.route("/api/minima/<icao>", methods=["PUT"])
 def put_minima_entry(icao):
-    """Save one aerodrome's Table 3 row + base minima (docs/adr/0005 §2/§3).
+    """Partial-update one aerodrome's approach/DH-MDH/RVR and/or Table 3 row.
+    Only fields present in the body change; anything already on file for
+    other fields is kept as-is — the split Equipment form
+    (approach/base_height_ft/base_rvr_vis_m) and Table 3 row form (row only)
+    each PUT only their own fields, and must not blank the other's. `row:
+    null` explicitly clears a stored row (an alternate role that no longer
+    applies); omitting `row` entirely just leaves it untouched — the
+    Equipment form never sends the key at all.
     Read-modify-write against the whole store — see _write_minima_entry."""
     icao = icao.upper()
     if not _MINIMA_ICAO_RE.match(icao):
         return jsonify({"error": "icao must be 4 letters"}), 400
 
     body = request.get_json(silent=True) or {}
-    try:
-        # Table 3's ft/m increments and published minima are always whole
-        # numbers — int(), not float(), so the entry form never displays a
-        # base minimum as "0.0 ft".
-        base_height_ft = int(body["base_height_ft"])
-        base_rvr_vis_m = int(body["base_rvr_vis_m"])
-    except (KeyError, TypeError, ValueError):
-        return jsonify({"error": "base_height_ft and base_rvr_vis_m are required numbers"}), 400
+    patch = {}
 
-    # `row` is OPTIONAL since docs/adr/0006 §4: the failed-equipment finding is
-    # NOTAM-triggered and role-independent, so an enroute contingency aerodrome
-    # can legitimately have a DH/MDH and an approach but no Table 3 row — it has
-    # no planning role for a row to describe. Table 3 still requires one
-    # wherever a planning role exists; that is enforced at render time, not here.
-    row = body.get("row")
-    if row not in (None, ""):
+    if "base_height_ft" in body or "base_rvr_vis_m" in body:
+        # Both travel together — a landing minimum with only one of the two
+        # numbers is not a usable figure to any downstream arithmetic. Table
+        # 3's ft/m increments and published minima are always whole numbers —
+        # int(), not float(), so the entry form never displays a base minimum
+        # as "0.0 ft".
         try:
-            row = int(row)
-        except (TypeError, ValueError):
-            return jsonify({"error": "row must be 1-6 (OM-A Table 3)"}), 400
-        if row not in range(1, 7):
-            return jsonify({"error": "row must be 1-6 (OM-A Table 3)"}), 400
-    else:
-        row = None
+            patch["base_height_ft"] = int(body["base_height_ft"])
+            patch["base_rvr_vis_m"] = int(body["base_rvr_vis_m"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"error": "base_height_ft and base_rvr_vis_m are required numbers"}), 400
 
-    # Free-text approach label ("VOR DME RWY 36"), docs/adr/0006 §4. Only the
-    # runway designator is ever parsed out of it, client-side, to decide whether
-    # a runway-specific equipment failure applies to THIS approach. Free text
-    # rather than a picker for the same reason ADR 0005 §2 chose manual row
-    # selection: it is a judgment already made by whoever read Lido, and a
-    # structured field would need an approach inventory this tool has no source
-    # for. Length-capped so the store can't be used as arbitrary storage.
-    approach = (body.get("approach") or "").strip()[:60]
+    if "approach" in body:
+        # Free-text approach label ("VOR DME RWY 36"), docs/adr/0006 §4. Only
+        # the runway designator is ever parsed out of it, client-side, to
+        # decide whether a runway-specific equipment failure applies to THIS
+        # approach. Free text rather than a picker for the same reason ADR
+        # 0005 §2 chose manual row selection: it is a judgment already made by
+        # whoever read Lido, and a structured field would need an approach
+        # inventory this tool has no source for. Length-capped so the store
+        # can't be used as arbitrary storage.
+        patch["approach"] = (body.get("approach") or "").strip()[:60]
 
-    entry = {
-        "approach": approach,
-        "row": row,
-        "base_height_ft": base_height_ft,
-        "base_rvr_vis_m": base_rvr_vis_m,
-        "updated": datetime.now(timezone.utc).date().isoformat(),
-    }
-    saved = _write_minima_entry(icao, entry)
+    if "row" in body:
+        # `row` is OPTIONAL since docs/adr/0006 §4: the failed-equipment
+        # finding is NOTAM-triggered and role-independent, so an enroute
+        # contingency aerodrome can legitimately have a DH/MDH and an approach
+        # but no Table 3 row — it has no planning role for a row to describe.
+        # Table 3 still requires one wherever a planning role exists; that is
+        # enforced at render time, not here.
+        row = body.get("row")
+        if row not in (None, ""):
+            try:
+                row = int(row)
+            except (TypeError, ValueError):
+                return jsonify({"error": "row must be 1-6 (OM-A Table 3)"}), 400
+            if row not in range(1, 7):
+                return jsonify({"error": "row must be 1-6 (OM-A Table 3)"}), 400
+        else:
+            row = None
+        patch["row"] = row
+
+    if not patch:
+        return jsonify({"error": "nothing to save"}), 400
+
+    # A Table 3 row needs a DH/MDH + RVR to attach to. The client only ever
+    # reaches the row form once those already exist (index.html's
+    # _handleMinimaAction only offers the row form once entry is non-null),
+    # but the API guards it directly rather than trust that ordering.
+    existing = _read_minima_store().get(icao) or {}
+    has_height = "base_height_ft" in patch or "base_height_ft" in existing
+    has_vis    = "base_rvr_vis_m" in patch or "base_rvr_vis_m" in existing
+    if not (has_height and has_vis):
+        return jsonify({"error": "base_height_ft and base_rvr_vis_m must be entered before a Table 3 row"}), 400
+
+    patch["updated"] = datetime.now(timezone.utc).date().isoformat()
+    saved = _write_minima_entry(icao, patch)
     return jsonify(saved), 200
 
 
