@@ -813,9 +813,12 @@
 // ── Run + group URL params (?r=<run_id>&g=1|2) ────────────────────────────
 // RUN is what keeps a cached briefing tied to its own flight: without it every
 // flight's airports.json shares one URL, so an offline device would serve the
-// previous flight's weather under the current flight's number. Empty RUN falls
-// back to the legacy flat /data/<file> route, which serves the CLI-produced
-// data/ folder (MVP demo only — no groups, no run scoping).
+// previous flight's weather under the current flight's number. There is
+// deliberately NO unscoped fallback: sw.js derives its cache bucket from
+// pathname.split('/')[2], so a flat /data/<file> URL is cache-first into a
+// bucket named after the file itself, pinning one flight's data forever —
+// the exact failure docs/adr/0003 exists to prevent. A load with no ?r=
+// therefore 404s and surfaces as "Load failed" rather than showing stale data.
 // BUNDLE is set only in the self-contained offline bundle (bundle_builder.py),
 // where every asset is an inlined data: URI and there is no server at all. It
 // is deliberately the ONLY fork in this file — same briefing logic either way.
@@ -827,7 +830,7 @@ const _hashG  = (location.hash.match(/g=(\d)/) || [])[1];
 const RUN     = BUNDLE ? (BUNDLE.run_id || "bundle") : (_params.get("r") || "");
 const GROUP   = BUNDLE ? (_hashG || "1") : (_params.get("g") || "1");
 const DATA    = f => BUNDLE ? (BUNDLE.assets[`${GROUP}/${f}`] || `data:application/json,null`)
-                            : (RUN ? `/data/${RUN}/${GROUP}/${f}` : `/data/${f}`);
+                            : `/data/${RUN}/${GROUP}/${f}`;
 const MANIFEST_URL = (RUN && !BUNDLE) ? `/data/${RUN}/manifest.json` : null;
 
 const ROUTE_COLORS = ["#5b9ef4", "#f4a15b"];  // leg 1 = blue, leg 2 = orange
@@ -2765,7 +2768,7 @@ function renderHeaderAirportBtns(airports, legs) {
 
 // ── Source Pane data (original MET + NOTAM PDF pages + click-to-highlight
 //   anchors). Each document loads independently — a run missing one JSON
-//   (rendering failure, legacy run, MVP demo) just keeps that Document
+//   (rendering failure, or a legacy run) just keeps that Document
 //   Section hidden (.src-doc-hidden) instead of losing the whole pane. The
 //   DOC button appears as soon as either document loads.
 function _fetchSrcDoc(doc, filename) {
@@ -2891,7 +2894,7 @@ Promise.all([
 fetch(DATA("general_notams.json"))
   .then(r => r.ok ? r.json() : null)
   .then(sections => {
-    if (!sections) return;  // absent on legacy / MVP runs — silently ignore
+    if (!sections) return;  // absent on legacy runs — silently ignore
     sections.forEach(s => {
       _applyTierOverrides(s.notams, s.key);
       _applyTierOverrides(s.filtered_out, s.key);

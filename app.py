@@ -10,7 +10,6 @@ Routes:
   GET  /map           → index.html (briefing UI; ?r=<run_id>&g=<group>)
   GET  /data/<run_id>/manifest.json      → precache list + completion marker
   GET  /data/<run_id>/<group>/<f>        → serve briefing data for that run
-  GET  /data/<f>      → legacy MVP demo fallback (static data/ folder)
 
 Security:
   ANTHROPIC_API_KEY loaded from .env via python-dotenv — never sent to browser.
@@ -1260,12 +1259,6 @@ def serve_tile(z, x, y):
         return Response("Not found", status=404)
     return send_from_directory(os.path.dirname(path), os.path.basename(path),
                                max_age=31536000)
-
-
-@app.route("/data/<filename>")
-def serve_data(filename):
-    # Legacy endpoint: serves the static data/ folder (MVP demo fallback only)
-    return send_from_directory(os.path.join(HERE, "data"), filename)
 
 
 # ── Progress page ─────────────────────────────────────────────────────────────
