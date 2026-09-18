@@ -330,6 +330,10 @@ def _merge_airports_legs(leg_airports_list):
                 "ceiling_indeterminate":  ap.get("ceiling_indeterminate", True),
                 "vis_indeterminate":      ap.get("vis_indeterminate", True),
                 "disregarded":            ap.get("disregarded", []),
+                "applicable_gust_kt":     ap.get("applicable_gust_kt"),
+                "gust_wind":              ap.get("gust_wind"),
+                "gust_source":            ap.get("gust_source"),
+                "crosswind":              ap.get("crosswind"),
             }
             if icao not in merged:
                 merged[icao] = {

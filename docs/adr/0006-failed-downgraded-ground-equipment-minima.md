@@ -163,6 +163,13 @@ was asked here. `docs/KNOWN_ISSUES.md` #13 says so plainly — open, not closed,
 because the verdict arithmetic is unverified both against a test and against the exact OM-A
 §8.1.3.2.3 wording. Treat that entry, not this paragraph, as the authoritative status.
 
+**Amendment (docs/adr/0007 §2, OM-A Issue 02 Rev 02):** the exact wording is now known:
+*"For Instrument Approach Operation Type A or Circling operation, the ceiling at or above
+MDH."* The `>=` above is confirmed as written. The ceiling test now applies only when the
+approach is Type A (`base_height_ft >= 250`, the §5 definition) or circling, so a Type B
+destination is judged on RVR/VIS alone. KNOWN_ISSUES #13 is narrowed to the one remaining
+gap: isolated destinations.
+
 The destination check is gated identically to the alternate one — see the Planning Minima
 gate amendment in §10 below — rather than always-on, so it does not resurrect the noise §10
 was written to avoid.

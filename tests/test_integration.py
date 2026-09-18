@@ -351,3 +351,52 @@ class TestNotamAnchorsSsa:
         for r in ssa_entry["catch_all"]["level_rects"]:
             assert 0 <= r["x0"] < r["x1"] <= 1, r
             assert 0 <= r["y0"] < r["y1"] <= 1, r
+
+
+_TG664_OFP = os.path.join(ROOT, "Input", "TG664_OFP.pdf")
+_TG664_MET = os.path.join(ROOT, "Input", "TG664_MET.pdf")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not (os.path.exists(_TG664_OFP) and os.path.exists(_TG664_MET)),
+                    reason="TG664 fixture PDFs not present in Input/")
+class TestTG664GustAdvisory:
+    """OM-A Issue 02 Rev 02 §8.1.6 gust advisory (docs/adr/0007 §1), end to end
+    through the real OFP/route/ETA path. RKSI is one of TG664's destination
+    alternates, and at its ETA the baseline carries 06010G20KT while wx_tier
+    is GREEN. That is the case the Crosswind check row's role-only gate exists
+    for: the Planning Minima block's weather gate would hide it."""
+
+    def test_rksi_alternate_carries_applicable_gust(self, tmp_path):
+        import sys
+        from datetime import timedelta
+        sys.path.insert(0, ROOT)
+        import app, parse_ofp, met_engine
+
+        page1, lines = app._read_ofp(_TG664_OFP)
+        etd, taxi, flt = app._extract_ofp_constants(page1)
+        takeoff = etd + timedelta(minutes=taxi)
+        fi = app._extract_flight_info(page1, lines, etd, takeoff, flt)
+        assert "RKSI" in fi["dest_altn"] + fi["era"] + fi["rcf_altn"]
+
+        parse_ofp.OFP_PDF, parse_ofp.OUT_JSON, parse_ofp.FLIGHT_TIME_MIN = \
+            _TG664_OFP, str(tmp_path / "route.json"), flt
+        parse_ofp.main()
+        met_engine.MET_PDF, met_engine.ROUTE_JSON = _TG664_MET, str(tmp_path / "route.json")
+        met_engine.OUT_JSON, met_engine.TAKEOFF_UTC = str(tmp_path / "airports.json"), takeoff
+        met_engine.main()
+
+        with open(tmp_path / "airports.json") as f:
+            per_leg = json.load(f)
+        leg = app._merge_airports_legs([per_leg])
+        rksi = next(a for a in leg if a["icao"] == "RKSI")["legs"][0]
+        assert rksi["wx_tier"] == "GREEN"
+        assert rksi["applicable_gust_kt"] == 20
+        assert rksi["gust_wind"] == "06010G20KT"
+        assert rksi["gust_source"] == "baseline"
+        # Crosswind check (docs/adr/0007 §3): 060/10G20 is 80 deg off RWY 34 —
+        # the most headwind of RKSI's runways — so 10 kt crosswind, 20 kt in the gust.
+        xw = rksi["crosswind"]
+        assert xw["runway"] == "34L/34R" and xw["runway_hdg"] == 340
+        assert (xw["headwind_kt"], xw["crosswind_kt"], xw["crosswind_gust_kt"]) == (2, 10, 20)
+        assert xw["verdict"] == "pass"

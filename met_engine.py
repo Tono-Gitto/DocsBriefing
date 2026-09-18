@@ -7,7 +7,7 @@ Per airport:
   - Reference time = TAKEOFF + ACCT of nearest route waypoint (haversine)
 """
 
-import json, os, re
+import json, math, os, re
 from datetime import datetime, timedelta, timezone
 from airport_coords import load_coords
 from _utils import haversine_nm, clean_pdf_lines
@@ -637,6 +637,169 @@ def _worst(pool):
     return min(numeric, key=lambda pair: pair[0])
 
 
+def _planning_sources(taf_base, becmg_in_progress, active_overlays):
+    """The OM-A §8.1.6 candidate pool shared by every planning check: a list
+    of (condition_text, source_label) — baseline, in-progress BECMG target,
+    then every overlay §8.1.6 does not let us disregard — plus the
+    `disregarded` transparency list (docs/adr/0005 §5). One filter, so the
+    ceiling/vis, gust and crosswind checks can never disagree on what counts.
+    """
+    sources, disregarded = [], []
+    if taf_base:
+        sources.append((taf_base, "baseline"))
+    if becmg_in_progress:
+        sources.append((becmg_in_progress["text"],
+                        f"BECMG target ({becmg_in_progress['window']})"))
+    for ov in active_overlays:
+        if ov["type"] in ("PROB30 TEMPO", "PROB40 TEMPO"):
+            disregarded.append({"type": ov["type"], "window": ov["window"],
+                                 "reason": "PROB+TEMPO combined — OM-A §8.1.6 permits disregarding"})
+            continue
+        if ov["type"] in ("TEMPO", "PROB30", "PROB40") and _is_transient_only(ov["text"]):
+            disregarded.append({"type": ov["type"], "window": ov["window"],
+                                 "reason": "transient/shower phenomenon"})
+            continue
+        sources.append((ov["text"], f"{ov['type']} ({ov['window']})"))
+    return sources, disregarded
+
+
+# OM-A §8.1.6 (Issue 02 Rev 02): in the Destination / Take-Off Alternate /
+# Dest. Alternate / Fuel ERA row, "Gusts exceeding crosswind limits should be
+# fully applied" in the FM, BECMG and persistent-TEMPO/PROB columns — Rev 01
+# said gusts "may be disregarded" there. Transient-TEMPO and PROB TEMPO still
+# permit disregarding mean wind and gusts, so both the gust and the crosswind
+# checks read exactly the pool the ceiling/vis search reads
+# (_planning_sources). Neither ever enters a Planning Minima verdict
+# (docs/adr/0007) — the crosswind check carries its own.
+_KT_PER_UNIT = {"KT": 1.0, "MPS": 1.943844, "KMH": 1 / 1.852}
+
+
+def _winds(text):
+    """Every wind token in text as {"token", "dir", "kt", "gust_kt"} — dir is
+    None for VRB, gust_kt None without a G group; speeds in knots."""
+    out = []
+    for tok in text.split():
+        m = _WIND_RE.match(tok)
+        if not m:
+            continue
+        k = _KT_PER_UNIT[m.group(3)]
+        spd = re.match(r"(?:VRB|\d{3})(\d{2,3})", tok).group(1)
+        out.append({
+            "token": tok,
+            "dir": None if m.group(1) == "VRB" else int(m.group(1)),
+            "kt": round(int(spd) * k),
+            "gust_kt": round(int(m.group(2)[1:]) * k) if m.group(2) else None,
+        })
+    return out
+
+
+def _gust_kt(text):
+    """(gust_kt, wind_token) for the highest-gust wind token in text, or
+    (None, None) when no token carries a G group. MPS/KMH convert to knots."""
+    best = (None, None)
+    for w in _winds(text):
+        if w["gust_kt"] is not None and (best[0] is None or w["gust_kt"] > best[0]):
+            best = (w["gust_kt"], w["token"])
+    return best
+
+
+# ── Crosswind (docs/adr/0007 §3) ─────────────────────────────────────────────
+# Company maximum crosswind, gusts included (§8.1.6 Rev 02 applies gusts).
+CROSSWIND_LIMIT_KT = 30
+# Within this many knots of the limit the verdict is "marginal": the heading
+# is designator x 10 (up to ±5° of rounding) and TAF wind is TRUE while the
+# designator is MAGNETIC — variation is not corrected (no source for it in
+# this tool), so a component near the limit could sit on either side of it.
+CROSSWIND_MARGIN_KT = 5
+
+# Runways shorter than this are left out of the runway choice: the MET runway
+# line lists every runway, including strips no B777 would use (ESMS 11/29 is
+# 800 m), and picking one for its headwind would under-report the crosswind on
+# the runway actually used. A screen, not a performance calculation. If no
+# runway reaches it, all are kept rather than evaluating nothing.
+MIN_RUNWAY_M = 2000
+
+_RWY_PAIR_RE = re.compile(r"^(\d{2})([LRC]?)/(\d{2})([LRC]?)$")
+
+
+def _runway_ends(runway_info, min_length_m=MIN_RUNWAY_M):
+    """[(numeric designator, heading_degM, [end labels])] from the MET runway
+    line ("01L/19R 4000 01R/19L 3700 ..."). Parallel ends sharing a number
+    collapse into one entry — they have identical wind components, so naming
+    one of 19L/19R over the other would be a choice the tool never made.
+    Pairs whose stated length is under min_length_m are dropped, unless that
+    would drop every pair."""
+    toks = (runway_info or "").split()
+    pairs = []
+    for k, tok in enumerate(toks):
+        m = _RWY_PAIR_RE.match(tok)
+        if not m:
+            continue
+        nxt = toks[k + 1] if k + 1 < len(toks) else ""
+        pairs.append((m, int(nxt) if nxt.isdigit() else None))
+    usable = [p for p in pairs if p[1] is None or p[1] >= min_length_m] or pairs
+    ends = {}
+    for m, _ in usable:
+        for num, side in ((m.group(1), m.group(2)), (m.group(3), m.group(4))):
+            labels = ends.setdefault(num, [])
+            if num + side not in labels:
+                labels.append(num + side)
+    return [(num, (int(num) * 10) or 360, sorted(labels)) for num, labels in sorted(ends.items())]
+
+
+def _wind_on_runway(w, runways):
+    """Pick the runway with the most headwind for wind w, then its components.
+    VRB has no direction: no runway can be chosen, and the whole speed is
+    taken as crosswind — the worst case, never a silent 000°."""
+    if w["dir"] is None:
+        return {"runway": None, "runway_hdg": None, "headwind_kt": 0,
+                "crosswind_kt": w["kt"], "crosswind_gust_kt": w["gust_kt"], "variable": True}
+    best = None
+    for num, hdg, labels in runways:
+        a = math.radians(w["dir"] - hdg)
+        head = math.cos(a)
+        if best is None or head > best[0]:
+            best = (head, abs(math.sin(a)), hdg, labels)
+    head, cross, hdg, labels = best
+    return {
+        "runway": "/".join(labels), "runway_hdg": hdg,
+        "headwind_kt": round(w["kt"] * head),
+        "crosswind_kt": round(w["kt"] * cross),
+        "crosswind_gust_kt": round(w["gust_kt"] * cross) if w["gust_kt"] is not None else None,
+        "variable": False,
+    }
+
+
+def _resolve_crosswind(runway_info, taf_base, becmg_in_progress, active_overlays,
+                       limit_kt=CROSSWIND_LIMIT_KT):
+    """Worst crosswind over the §8.1.6-applicable pool. Each applicable wind is
+    put on the runway with the most headwind for THAT wind (crews pick the
+    runway per wind), its crosswind is taken from the gust when one is stated
+    — §8.1.6 Rev 02 — else the mean, and the worst across the pool is
+    compared to the limit: > limit "fail", within CROSSWIND_MARGIN_KT of it
+    (or at it) "marginal", else "pass". None when there is no runway line;
+    verdict "unknown" when there is one but no applicable wind (no TAF) —
+    never a silent pass at an airport with a planning role."""
+    runways = _runway_ends(runway_info)
+    sources, _ = _planning_sources(taf_base, becmg_in_progress, active_overlays)
+    if not runways:
+        return None
+    worst = None
+    for text, label in sources:
+        for w in _winds(text):
+            r = _wind_on_runway(w, runways)
+            eff = r["crosswind_gust_kt"] if r["crosswind_gust_kt"] is not None else r["crosswind_kt"]
+            if worst is None or eff > worst["effective_kt"]:
+                worst = {**r, "wind": w["token"], "source": label, "effective_kt": eff}
+    if worst is None:
+        return {"verdict": "unknown", "limit_kt": limit_kt}
+    eff = worst["effective_kt"]
+    worst["limit_kt"] = limit_kt
+    worst["verdict"] = ("fail" if eff > limit_kt
+                        else "marginal" if eff >= limit_kt - CROSSWIND_MARGIN_KT else "pass")
+    return worst
+
+
 def _resolve_planning_minima(taf_base, becmg_in_progress, active_overlays):
     """OM-A §8.1.6 applicability filter for the alternate/ERA planning-minima
     check (docs/adr/0005 §5). Returns the worst-case (lowest) ceiling/vis a
@@ -653,46 +816,32 @@ def _resolve_planning_minima(taf_base, becmg_in_progress, active_overlays):
     combined PROB30/40 TEMPO, are excluded outright (they must never win the
     min() even when numerically worst) — every exclusion is recorded in
     `disregarded`, unconditionally, whether or not it would have been
-    binding.
+    binding (see _planning_sources).
 
     Returns a dict: applicable_ceiling_ft, applicable_vis_m (None if
     indeterminate or unrestricted), ceiling_source, vis_source,
-    ceiling_indeterminate, vis_indeterminate, disregarded.
+    ceiling_indeterminate, vis_indeterminate, disregarded, plus
+    applicable_gust_kt / gust_wind / gust_source — the highest gust across
+    the same surviving pool (None when no applicable group states one).
     """
-    disregarded = []
     base = _planning_candidate(taf_base) if taf_base else None
-
     ceiling_indeterminate = base is None or not base["cloud_stated"]
     vis_indeterminate = base is None or not base["has_vis_token"]
 
-    pool_ceiling = []
-    pool_vis = []
-    if base is not None:
-        pool_ceiling.append((base["ceiling_ft"], "baseline"))
-        pool_vis.append((base["vis_m"], "baseline"))
-
-    if becmg_in_progress:
-        c = _planning_candidate(becmg_in_progress["text"])
-        label = f"BECMG target ({becmg_in_progress['window']})"
+    sources, disregarded = _planning_sources(taf_base, becmg_in_progress, active_overlays)
+    pool_ceiling, pool_vis = [], []
+    pool_gust = []  # (gust_kt, wind_token, source) — max() wins, not min()
+    for text, label in sources:
+        c = _planning_candidate(text)
         pool_ceiling.append((c["ceiling_ft"], label))
         pool_vis.append((c["vis_m"], label))
-
-    for ov in active_overlays:
-        label = f"{ov['type']} ({ov['window']})"
-        if ov["type"] in ("PROB30 TEMPO", "PROB40 TEMPO"):
-            disregarded.append({"type": ov["type"], "window": ov["window"],
-                                 "reason": "PROB+TEMPO combined — OM-A §8.1.6 permits disregarding"})
-            continue
-        if ov["type"] in ("TEMPO", "PROB30", "PROB40") and _is_transient_only(ov["text"]):
-            disregarded.append({"type": ov["type"], "window": ov["window"],
-                                 "reason": "transient/shower phenomenon"})
-            continue
-        c = _planning_candidate(ov["text"])
-        pool_ceiling.append((c["ceiling_ft"], label))
-        pool_vis.append((c["vis_m"], label))
+        pool_gust.append((*_gust_kt(text), label))
 
     applicable_ceiling_ft, ceiling_source = (None, None) if ceiling_indeterminate else _worst(pool_ceiling)
     applicable_vis_m, vis_source = (None, None) if vis_indeterminate else _worst(pool_vis)
+    gusts = [g for g in pool_gust if g[0] is not None]
+    applicable_gust_kt, gust_wind, gust_source = (
+        max(gusts, key=lambda g: g[0]) if gusts else (None, None, None))
 
     return {
         "applicable_ceiling_ft": applicable_ceiling_ft,
@@ -702,6 +851,9 @@ def _resolve_planning_minima(taf_base, becmg_in_progress, active_overlays):
         "ceiling_indeterminate": ceiling_indeterminate,
         "vis_indeterminate": vis_indeterminate,
         "disregarded": disregarded,
+        "applicable_gust_kt": applicable_gust_kt,
+        "gust_wind": gust_wind,
+        "gust_source": gust_source,
     }
 
 
@@ -734,6 +886,7 @@ def main():
             taf_base, becmg_prog, active_overlays, taf_base_src = condense_taf(d["taf_raw"], ref_dt)
         wx_tier = _classify_wx_tier(taf_base, becmg_prog, active_overlays)
         planning_minima = _resolve_planning_minima(taf_base, becmg_prog, active_overlays)
+        crosswind = _resolve_crosswind(d.get("runway_info"), taf_base, becmg_prog, active_overlays)
 
         out.append({
             "icao": icao,
@@ -759,6 +912,10 @@ def main():
             "ceiling_indeterminate": planning_minima["ceiling_indeterminate"],
             "vis_indeterminate": planning_minima["vis_indeterminate"],
             "disregarded": planning_minima["disregarded"],
+            "applicable_gust_kt": planning_minima["applicable_gust_kt"],
+            "gust_wind": planning_minima["gust_wind"],
+            "gust_source": planning_minima["gust_source"],
+            "crosswind": crosswind,
         })
 
     os.makedirs(os.path.dirname(OUT_JSON), exist_ok=True)

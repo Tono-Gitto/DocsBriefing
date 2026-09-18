@@ -3,8 +3,9 @@
 Open problems, unproven claims, and accepted limitations. Close an entry by deleting it in
 the same commit that fixes it.
 
-Last reviewed: 2026-09-09, amending #13 (destination planning minima implemented, regulatory
-fidelity unverified) and #16 (Planning Minima gate widened to weather-or-equipment-finding).
+Last reviewed: 2026-09-18, for OM-A Issue 02 Rev 02 (docs/adr/0007). #13 is narrowed: the
+§8.1.3.2.3 wording is now verified, and only the isolated-destination gap is left. #18 is new:
+a crosswind check (30 kt maximum, designator headings) and its accepted imprecisions.
 
 | # | Issue | Severity |
 |---|---|---|
@@ -19,7 +20,9 @@ fidelity unverified) and #16 (Planning Minima gate widened to weather-or-equipme
 | 10 | `_GROUP_RE` misses a space-split `FM DDHHMM`, running two TAF states together | low |
 | 11 | `data/aerodrome_minima.json` is wiped on every Railway redeploy — unlike tiles/fir_coords, not re-derivable | accepted |
 | 12 | `era` extraction can't distinguish Fuel ERA from a future EDTO ERA in the same field | low |
+| 13 | An isolated destination gets zero-margin destination minima instead of Table 3 | low |
 | 17 | A manual tier override can go silently inert if its NOTAM later splits into COM-INFO parts | accepted |
+| 18 | Crosswind check uses designator headings (magnetic vs true wind, variation not corrected), dry-runway 30 kt, ignores NOTAM closures | accepted |
 
 ---
 
@@ -272,30 +275,33 @@ transient-phenomenon TEMPO deterioration as applicable where the fuel-ERA row di
 Nothing currently triggers this; recorded so it isn't rediscovered as a fresh bug the first
 time it does.
 
-## #13 — Destination planning minima (§8.1.3.2.3) — implemented, regulatory fidelity unverified
+## #13 — Destination planning minima: an isolated destination gets no Table 3 margin
 
-**Status:** open, downgraded from "not computed" to "computed, but not confirmed to match
-OM-A's exact wording" — not closed outright, because the residual risk (a wrong number
-reaching the aircraft) is the same class this ADR was written to avoid.
+**Status:** open, narrowed 2026-09-18. The regulatory-wording part is closed; one gap is left.
 
-The destination Planning Minima block now computes a real verdict (`index.html`'s
-`_minimaCompute`, `role === "destination"` branch, docs/adr/0006 §3 amendment) instead of
-rendering `NOT COMPUTED`. `minima_snapshot.json` was extended to `dest`/`rcf_dest` ICAOs
-alongside alternate/ERA/`rcf_altn` (ADR 0005 §7 amendment) so the check also works offline.
+The destination Planning Minima block computes a real verdict (`index.html`'s
+`_minimaCompute`, `role === "destination"` branch, docs/adr/0006 §3 amendment), and
+`minima_snapshot.json` covers `dest`/`rcf_dest` ICAOs (ADR 0005 §7 amendment), so the check
+also works offline.
 
-**What was implemented, precisely:** the entered DH/MDH and RVR/VIS are compared directly
-against the applicable ETA±1h forecast, `>=` passes, with the Table 3 margin pinned to `0`
-instead of a selected row's increment — the same `_minimaVerdict()` the alternate/ERA check
-uses, not a second hand-written one. Layer 1's re-determined RVR (when a facility is failed)
-feeds in identically to the alternate check.
+**Closed by OM-A Issue 02 Rev 02 (docs/adr/0007 §2).** This entry used to hedge that the
+exact §8.1.3.2.3 wording was unknown. Rev 02's text reads *"RVR/Visibility: at least the
+prescribed RVR/Visibility…; and — For Instrument Approach Operation Type A or Circling
+operation, the ceiling at or above MDH."* The existing `>=` matches "at or above". The
+ceiling criterion applies only to Type A or circling, so a Type B destination (DH < 250 ft)
+is now judged on RVR/VIS alone (`_destCeilingApplies`). Before, it could FAIL on a ceiling
+the OM-A does not test.
 
-**What this is not:** OM-A §8.1.3.2.3's exact wording (as understood when this was first
-deferred) tests "ceiling above MDH" for an NPA/circling approach, a comparison against a
-different quantity than Table 3's "MDH + increment". This implementation is the same-shape,
-zero-margin comparison the crew asked for — not a verified implementation of that specific
-NPA/circling nuance. If the exact regulatory text is later obtained and it turns out to
-specify something other than a bare `>=` compare against the entered DH/MDH, this needs a
-second pass, not just a config change.
+**Still open:** the same section says *"Planning minima for isolated destination shall use
+the same criteria of destination alternate minima"*, which means Table 3 with a row
+increment. The tool doesn't detect an isolated destination (nothing in `_extract_alternates`
+reads one from the OFP), so it gives every `dest` the zero-margin check. An isolated
+destination can therefore show PASS where Table 3 would FAIL. Fixing this needs a reliable
+isolated-destination marker in the OFP, then a `"table3"` role for that `dest`.
+
+**Test gap (unchanged):** the arithmetic runs client-side and the repo has no JS harness.
+`TestMinimaApiPartialMerge` covers only the store contract. The Type A/B gate was checked by
+hand in node (see ADR 0007, Consequences).
 
 ## #14 — Two NOTAM schedule forms are unparsed, so their windows read as continuous
 
@@ -396,3 +402,25 @@ unrelated sub-notice.
 whole at override time and (b) gains new sub-notices or a `--` boundary on a later
 re-upload of the same recurring flight — a bundle's dash-boundary structure is set by the
 NOTAM PDF's own formatting, not something that changes flight-to-flight for a fixed bundle.
+
+## #18 — Crosswind check: heading, variation and runway-availability imprecision
+
+**Status:** accepted, by design (docs/adr/0007 §3).
+
+The Crosswind check computes a verdict against a **30 kt maximum**. For each §8.1.6-applicable
+wind (OM-A Issue 02 Rev 02: gusts fully applied) it takes the runway with the most headwind
+and uses the gust crosswind when a gust is stated. Its known limits:
+
+- **Heading is designator × 10, magnetic; TAF wind is true.** Variation is not corrected
+  because there is no source for it in the tool. Rounding adds up to ±5°. Near the limit the
+  error is a few knots, so 25–30 kt reads **MARGINAL**, not PASS. At high-variation
+  aerodromes (roughly 10° or more) even a mid-band figure can be off by more than the 5 kt band.
+- **Runway condition is not modelled.** 30 kt is the dry-runway maximum, and the row tells
+  the crew to reduce it for wet or contaminated runways.
+- **NOTAM runway closures are ignored.** A runway closed at the ETA can still be chosen,
+  which can make the reported crosswind lower than on the runway actually available.
+- **Runways under 2000 m are skipped** when a longer one exists. This is a plausibility
+  screen, not a B777 landing-distance calculation.
+- **`VRB` takes the full speed as crosswind.** That is conservative, so a `VRB03KT` shows
+  3 kt crosswind.
+- The verdict is **separate from Planning Minima** and never changes that block's PASS/FAIL.

@@ -14,6 +14,8 @@ from met_engine import (
     _tier_for_text,
     _strip_temp,
     _resolve_planning_minima,
+    _resolve_crosswind,
+    _runway_ends,
 )
 
 
@@ -749,3 +751,176 @@ class TestPlanningMinima:
         # restatement never reaches applicable_ceiling_ft/applicable_vis_m.
         assert minima["applicable_ceiling_ft"] is None   # FEW015/SCT040TCU: unrestricted
         assert minima["applicable_vis_m"] == 9999
+
+
+class TestPlanningGustAdvisory:
+    """OM-A §8.1.6, Issue 02 Rev 02 (docs/adr/0007): in the Destination /
+    Take-Off Alternate / Dest. Alternate / Fuel ERA row, gusts exceeding
+    crosswind limits are now "fully applied" in the FM, BECMG and persistent
+    TEMPO/PROB columns (Rev 01: "may be disregarded"). Transient TEMPO and
+    PROB TEMPO still permit disregarding them. Advisory only — the gust is
+    read over exactly the pool ceiling/vis use, and never touches them."""
+
+    def test_no_gust_anywhere_is_none(self):
+        minima = _resolve_planning_minima("24008KT 9999 SCT020", None, [])
+        assert minima["applicable_gust_kt"] is None
+        assert minima["gust_wind"] is None
+        assert minima["gust_source"] is None
+
+    def test_baseline_gust_reported(self):
+        minima = _resolve_planning_minima("27018G32KT 9999 SCT020", None, [])
+        assert minima["applicable_gust_kt"] == 32
+        assert minima["gust_wind"] == "27018G32KT"
+        assert minima["gust_source"] == "baseline"
+
+    def test_becmg_in_progress_gust_is_applied(self):
+        # Rev 01 let this be disregarded; Rev 02 applies it from the start of
+        # the change.
+        becmg = {"text": "30020G38KT 9999 SCT020", "window": "10/1000Z-10/1200Z"}
+        minima = _resolve_planning_minima("24008KT 9999 SCT020", becmg, [])
+        assert minima["applicable_gust_kt"] == 38
+        assert minima["gust_source"] == "BECMG target (10/1000Z-10/1200Z)"
+
+    def test_persistent_tempo_gust_is_applied(self):
+        # A wind-only TEMPO carries no transient phenomenon, so it sits in the
+        # persistent column, where Rev 02 applies the gust in full.
+        overlays = [{"type": "TEMPO", "text": "31025G45KT", "window": "10/1015Z-10/1130Z"}]
+        minima = _resolve_planning_minima("27018G32KT 9999 SCT020", None, overlays)
+        assert minima["applicable_gust_kt"] == 45
+        assert minima["gust_source"] == "TEMPO (10/1015Z-10/1130Z)"
+
+    def test_bare_prob_gust_is_applied(self):
+        overlays = [{"type": "PROB30", "text": "31025G40KT 4000 BR", "window": "10/1015Z-10/1130Z"}]
+        minima = _resolve_planning_minima("24008KT 9999 SCT020", None, overlays)
+        assert minima["applicable_gust_kt"] == 40
+
+    def test_transient_tempo_gust_still_disregarded(self):
+        # Unchanged by Rev 02: "Mean wind and gusts exceeding required limits
+        # may be disregarded" in the transient/shower column.
+        overlays = [{"type": "TEMPO", "text": "31030G50KT 3000 TSRA BKN010CB",
+                     "window": "10/1015Z-10/1130Z"}]
+        minima = _resolve_planning_minima("27018G32KT 9999 SCT020", None, overlays)
+        assert minima["applicable_gust_kt"] == 32
+        assert minima["gust_source"] == "baseline"
+
+    def test_prob_tempo_gust_still_disregarded(self):
+        overlays = [{"type": "PROB40 TEMPO", "text": "31030G50KT", "window": "10/1015Z-10/1130Z"}]
+        minima = _resolve_planning_minima("24008KT 9999 SCT020", None, overlays)
+        assert minima["applicable_gust_kt"] is None
+
+    def test_mps_and_kmh_convert_to_knots(self):
+        assert _resolve_planning_minima("27010G20MPS 9999 SCT020", None, [])["applicable_gust_kt"] == 39
+        assert _resolve_planning_minima("27030G63KMH 9999 SCT020", None, [])["applicable_gust_kt"] == 34
+
+    def test_gust_never_moves_ceiling_or_vis(self):
+        plain = _resolve_planning_minima("24008KT 3000 BKN008", None, [])
+        gusty = _resolve_planning_minima("24018G40KT 3000 BKN008", None, [])
+        for k in ("applicable_ceiling_ft", "applicable_vis_m", "ceiling_source",
+                  "vis_source", "ceiling_indeterminate", "vis_indeterminate", "disregarded"):
+            assert plain[k] == gusty[k]
+
+
+class TestCrosswind:
+    """Crosswind check (docs/adr/0007 §3). Runway heading = designator x 10
+    (magnetic, variation not corrected). For each §8.1.6-applicable wind, pick
+    the runway with the most headwind, then its crosswind. Gust crosswind when a
+    gust is stated, else mean, compared with the 30 kt limit."""
+
+    RWY = "01L/19R 4000 01R/19L 3700"   # VTBS-shaped: one parallel pair
+
+    def test_runway_ends_collapse_parallels(self):
+        assert _runway_ends(self.RWY) == [("01", 10, ["01L", "01R"]), ("19", 190, ["19L", "19R"])]
+        assert _runway_ends("18/36 3000") == [("18", 180, ["18"]), ("36", 360, ["36"])]
+        assert _runway_ends(None) == []
+
+    def test_pure_headwind_picks_that_runway(self):
+        xw = _resolve_crosswind(self.RWY, "19025KT 9999 SCT020", None, [])
+        assert xw["runway"] == "19L/19R" and xw["runway_hdg"] == 190
+        assert xw["headwind_kt"] == 25 and xw["crosswind_kt"] == 0
+        assert xw["verdict"] == "pass"
+
+    def test_most_headwind_wins_over_reciprocal(self):
+        # 240/20: 19 has +cos50 headwind, 01 would be a tailwind.
+        xw = _resolve_crosswind(self.RWY, "24020KT 9999 SCT020", None, [])
+        assert xw["runway"] == "19L/19R"
+        assert xw["headwind_kt"] == 13 and xw["crosswind_kt"] == 15
+
+    def test_most_headwind_across_different_runways(self):
+        # 09/27 vs 18/36, wind 250/30: 27 is 20 deg off, so it beats 18 (70 deg off).
+        xw = _resolve_crosswind("09/27 3000 18/36 2500", "25030KT 9999 SCT020", None, [])
+        assert xw["runway"] == "27"
+        assert xw["crosswind_kt"] == 10
+
+    def test_ninety_degree_crosswind_over_limit_fails(self):
+        xw = _resolve_crosswind("18/36 3000", "09035KT 9999 SCT020", None, [])
+        assert xw["crosswind_kt"] == 35 and xw["headwind_kt"] == 0
+        assert xw["verdict"] == "fail"
+
+    def test_gust_is_applied_not_the_mean(self):
+        # 090 on 18/36: mean 20 kt passes, gust 36 kt fails. §8.1.6 Rev 02 applies the gust.
+        xw = _resolve_crosswind("18/36 3000", "09020G36KT 9999 SCT020", None, [])
+        assert xw["crosswind_kt"] == 20 and xw["crosswind_gust_kt"] == 36
+        assert xw["effective_kt"] == 36 and xw["verdict"] == "fail"
+
+    def test_limit_boundary(self):
+        # Exactly 30 kt is within the limit ("exceeding" fails), but marginal.
+        assert _resolve_crosswind("18/36 3000", "09030KT 9999", None, [])["verdict"] == "marginal"
+        assert _resolve_crosswind("18/36 3000", "09031KT 9999", None, [])["verdict"] == "fail"
+        assert _resolve_crosswind("18/36 3000", "09025KT 9999", None, [])["verdict"] == "marginal"
+        assert _resolve_crosswind("18/36 3000", "09024KT 9999", None, [])["verdict"] == "pass"
+
+    def test_vrb_is_full_crosswind_not_zero(self):
+        xw = _resolve_crosswind(self.RWY, "VRB20G32KT 9999 SCT020", None, [])
+        assert xw["variable"] is True and xw["runway"] is None
+        assert xw["crosswind_kt"] == 20 and xw["crosswind_gust_kt"] == 32
+        assert xw["verdict"] == "fail"
+
+    def test_calm_is_zero(self):
+        xw = _resolve_crosswind(self.RWY, "00000KT CAVOK", None, [])
+        assert xw["crosswind_kt"] == 0 and xw["verdict"] == "pass"
+
+    def test_each_wind_gets_its_own_runway_and_worst_is_reported(self):
+        # Baseline 190/10 is straight down 19. A persistent TEMPO at 280/25G35 is
+        # 90 deg off both 01 and 19 (zero headwind either way), so its whole gust
+        # is crosswind and it is the worst wind in the pool.
+        overlays = [{"type": "TEMPO", "text": "28025G35KT 4000 BR", "window": "10/1015Z-10/1130Z"}]
+        xw = _resolve_crosswind(self.RWY, "19010KT 9999 SCT020", None, overlays)
+        assert xw["source"] == "TEMPO (10/1015Z-10/1130Z)" and xw["wind"] == "28025G35KT"
+        assert xw["effective_kt"] == 35 and xw["verdict"] == "fail"
+
+    def test_transient_tempo_wind_disregarded(self):
+        overlays = [{"type": "TEMPO", "text": "28030G45KT 3000 TSRA BKN010CB",
+                     "window": "10/1015Z-10/1130Z"}]
+        xw = _resolve_crosswind(self.RWY, "19010KT 9999 SCT020", None, overlays)
+        assert xw["source"] == "baseline" and xw["verdict"] == "pass"
+
+    def test_prob_tempo_wind_disregarded(self):
+        overlays = [{"type": "PROB30 TEMPO", "text": "28030G45KT", "window": "10/1015Z-10/1130Z"}]
+        assert _resolve_crosswind(self.RWY, "19010KT 9999 SCT020", None, overlays)["source"] == "baseline"
+
+    def test_becmg_target_wind_counts(self):
+        becmg = {"text": "10030KT 9999 SCT020", "window": "10/1000Z-10/1200Z"}
+        xw = _resolve_crosswind(self.RWY, "19010KT 9999 SCT020", becmg, [])
+        assert xw["source"] == "BECMG target (10/1000Z-10/1200Z)"
+        assert xw["crosswind_kt"] == 30
+
+    def test_mps_converts(self):
+        # 090/15 MPS = 29 kt, straight across 18/36.
+        assert _resolve_crosswind("18/36 3000", "09015MPS 9999", None, [])["crosswind_kt"] == 29
+
+    def test_no_runway_line_is_none(self):
+        assert _resolve_crosswind(None, "19010KT 9999", None, []) is None
+
+    def test_no_taf_is_unknown_not_pass(self):
+        # WIDD on TG415 is a destination alternate with a runway line and no TAF.
+        assert _resolve_crosswind(self.RWY, None, None, [])["verdict"] == "unknown"
+
+    def test_short_runway_excluded_from_choice(self):
+        # ESMS: 11/29 is 800 m. Wind 290/20 would favour it with a pure headwind;
+        # on 17/35 (2800 m) the same wind is a 120-deg / 60-deg split instead.
+        xw = _resolve_crosswind("11/29 800 17/35 2800", "29020KT 9999", None, [])
+        assert xw["runway"] == "35" and xw["crosswind_kt"] == 17
+
+    def test_all_short_runways_are_kept(self):
+        assert _runway_ends("13/31 1840") == [("13", 130, ["13"]), ("31", 310, ["31"])]
+

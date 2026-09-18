@@ -90,6 +90,20 @@ class TestMergeAirportsLegs:
         merged = _merge_airports_legs([leg1])
         assert merged[0]["legs"][0]["taf_base_src"] == [{"t": "24008KT", "s": 21}]
 
+    def test_gust_advisory_survives_merge(self):
+        # OM-A §8.1.6 Rev 02 gust advisory (docs/adr/0007) — same whitelist
+        # hazard as taf_base_src above.
+        leg1 = [{"icao": "VTBS", "lat": 1, "lon": 1, "applicable_gust_kt": 35,
+                 "gust_wind": "27018G35KT", "gust_source": "baseline"}]
+        leg = _merge_airports_legs([leg1])[0]["legs"][0]
+        assert (leg["applicable_gust_kt"], leg["gust_wind"], leg["gust_source"]) == \
+            (35, "27018G35KT", "baseline")
+
+    def test_crosswind_survives_merge(self):
+        xw = {"runway": "19L/19R", "crosswind_kt": 14, "verdict": "pass"}
+        leg1 = [{"icao": "VTBS", "lat": 1, "lon": 1, "crosswind": xw}]
+        assert _merge_airports_legs([leg1])[0]["legs"][0]["crosswind"] == xw
+
 
 class TestFirMarkerPosition:
     def test_skips_waypoint_near_airport(self):

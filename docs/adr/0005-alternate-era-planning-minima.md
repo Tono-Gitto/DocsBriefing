@@ -203,6 +203,14 @@ unrestricted):
   destination alternates; enforcing that trigger is out of scope, but the absence itself
   must render as an explicit finding, never a blank row that reads as "nothing to report."
 
+**Amendment (docs/adr/0007 §1, OM-A Issue 02 Rev 02):** Rev 02 changed the §8.1.6 table's
+wind cells only, and left the ceiling/vis cells described above as they were. Gusts
+exceeding crosswind limits are now "fully applied" in the FM, BECMG and persistent
+TEMPO/PROB columns (Rev 01: "may be disregarded"). The same pool now also produces the
+`applicable_gust_kt`/`gust_wind`/`gust_source` (`max()` rather than `min()`). ADR 0007 §3's
+crosswind check reads the same pool, now factored out as `_planning_sources()`. That check
+has its own verdict and never enters Planning Minima's (KNOWN_ISSUES #18).
+
 `applicable_ceiling_ft`/`applicable_vis_m` is `min()` over the surviving candidate pool
 (baseline plus every non-excluded BECMG/FM/TEMPO/PROB source), tracked with a `*_source`
 label naming which source produced the winning value, so the panel can show its
@@ -411,6 +419,7 @@ passed:**
   governing table)
 - OM-A §8.1.6 — Application of Aerodrome Forecasts (TAF & TREND) to Pre-Flight Planning
   (the applicability matrix, Decision 5)
+- ADR 0007 — the OM-A Issue 02 Rev 02 delta (§8.1.6 gusts; Table 3 checked and unchanged)
 - ADR 0001 — page images + parse-time anchors
 - ADR 0003 — offline briefing (manifest/precache pattern, the no-fork rule)
 - ADR 0004 — client-side tier overrides (read-modify-write pattern, the click-isolation
