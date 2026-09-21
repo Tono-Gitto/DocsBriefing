@@ -341,10 +341,97 @@ _T2_FIR_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A navaid failure that is explicitly bounded — to a radial range, a sector, a
+# distance band — is a limitation on an aid that is
+# still in service, not an outage of it. ZBAA's ZBBBE2197/26 reads
+#   "DME 36L 'IDK' CH54X LIMITATION: DME U/S BTN 11NM-12.5NM, BTN 19NM-22NM
+#    FOR ILS/DME APPROACH PROCEDURE."
+# The DME works everywhere else on that approach, so badging it T1 alongside a
+# genuine "DME WITHDRAWN FOR MAINT" is a false alarm on the most common NOTAM the
+# Chinese AIS (ZBBB) publishes — TG664 alone carries thirteen of them.
+#
+# The bound must be *stated geometry* — a radial, a sector, a distance. "PART U/S"
+# is deliberately NOT here: in European and Chinese NOTAM usage "PART" names a
+# component, not a fraction. EDDB's EDDZA6387/25 ("LOEWENBERG DVOR/DME LWB,
+# DVOR-PART U/S") and WIDD's WRRRA2129/26 ("ILS/DME CH38X, DME PART U/S") each
+# report one half of a combined aid failing *completely*, which is a real outage
+# and must keep its tier. Matching "PART U/S" dropped all four to T3.
+#
+# Only a statement that pairs U/S *with* its own geometry is stripped. The bare
+# header phrases ("LIMITED TO USE:", "LIMITATION:") are deliberately NOT matched:
+# ZGHA's ZBBBG2520/26 reads "DUE TO LAOLIANGCANG VOR/DME 'LLC' LIMITED TO USE, FLW
+# STAR PROCEDURE U/S: STAR RWY36L/R(ZGHA-9B):RUK-01A" — there the limitation is the
+# *cause* and the consequence is a published STAR withdrawn, which is T1. Matching
+# the header swallowed the consequence with it. A header carries no U/S of its own,
+# so leaving it in the body never trips a tier.
+_NAVAID_LIMITED_RE = re.compile(
+    r"(\bU/S\b[^.;]{0,48}?\bBTN\b[^.;]{0,48}?(\bRADIAL\b|\d+(\.\d+)?\s*(NM|DEG))"
+    r"|\bU/S\b[^.;]{0,48}?\b(BYD|BEYOND|WI|WITHIN)\b[^.;]{0,32}?\d+(\.\d+)?\s*(NM|DEG)"
+    r"|\bU/S\b[^.;]{0,48}?\bON\s+RADIAL\b"
+    r"|\bU/S\b[^.;]{0,48}?\bSECTOR\b"
+    r")",
+    re.IGNORECASE,
+)
+
+# Statement separators. The limitation strip runs per statement, not per body, so a
+# NOTAM that carries a real closure *beside* a bounded limitation keeps its tier —
+# only the bounded statements are removed before reclassifying.
+#
+# A '.' only ends a statement when whitespace or end-of-string follows it. RJTT's
+# RJAAJ1656/26 writes "APCH-GUIDANCE-LGT FOR RWY 16R/16L(NR.4) U/S" and ZSAM's
+# ZBBBM1536/26 writes "114.7MHZ" — splitting on a bare '.' tears both mid-token and
+# destroys the DME/VOR-to-U/S adjacency the tier tables match on.
+_STATEMENT_SPLIT_RE = re.compile(r"[;\n]|\.(?=\s)")
+
+# The limitation rule is scoped to *navaids*. A partially failed approach lighting
+# system is not the same species of non-event: §8.1.3.3.6 re-determines landing
+# minima from it, and equipment_minima.py reads the stated remaining length to pick
+# FALS/IALS/BALS/NALS. RJFF's RJAAF0920/26 ("PALS FOR RWY 16L PARTLY U/S" with
+# "AVBL APCH LGT LEN 427M" → IALS, docs/adr/0006) must keep its tier, so a body that
+# names any lighting or marking facility is left alone even if it says "PARTLY U/S".
+_NAVAID_TOKEN_RE = re.compile(
+    r"\b(DME|DVOR|VOR|VORTAC|TACAN|NDB|LOC|ILS|GLS|GP)\b", re.IGNORECASE)
+_LIGHTING_TOKEN_RE = re.compile(
+    r"\b(LGT|LIGHT|LIGHTS|LIGHTING|PALS|SALS|FALS|IALS|BALS|NALS|PAPI|VASI"
+    r"|RETIL|REDL|RCLL|RTIL|RWY-THR-ID|APCH-GUIDANCE|APCH LGT|MARKING)\b",
+    re.IGNORECASE)
+
+
+def _is_navaid_limitation_body(full):
+    """True when the body is about a navaid and not about lighting/markings.
+
+    The gate is body-level, not statement-level, because the facility is routinely
+    named only in the header line: ZSAM's ZBBBM1536/26 opens "XINGLIN VOR/DME 'XLN'
+    ... LIMITED TO USE:" and its numbered statements below say bare "U/S BTN RADIAL
+    090DEG-188DEG CLOCKWISE" with no navaid token of their own.
+    """
+    return bool(_NAVAID_TOKEN_RE.search(full)) and not _LIGHTING_TOKEN_RE.search(full)
+
+
+def _strip_navaid_limitations(full):
+    """Drop the statements that only assert a *bounded* navaid limitation.
+
+    Returns the remaining text. Used by _classify_tier to answer "once the
+    radial/distance-limited statements are set aside, is anything actually
+    out of service?" — never called on its own.
+    """
+    kept = [s for s in _STATEMENT_SPLIT_RE.split(full)
+            if not _NAVAID_LIMITED_RE.search(s)]
+    return " ".join(kept)
+
+
 def _classify_tier(body_lines, is_fir=False):
     """Return 1, 2, or 3. Checks joined body so multi-line NOTAMs aren't penalised.
-    FIR NOTAMs use stricter T1 criteria (airspace-critical only); T2 for navaid outages."""
+    FIR NOTAMs use stricter T1 criteria (airspace-critical only); T2 for navaid outages.
+
+    A bounded navaid limitation (a radial range, a distance band, "PART U/S") is not
+    an outage — see _NAVAID_LIMITED_RE. Those statements are stripped before the
+    tier tables run, so such a NOTAM lands at T3 while a genuine outage in the same
+    body still scores on its own.
+    """
     full = " ".join(body_lines)
+    if _is_navaid_limitation_body(full) and _NAVAID_LIMITED_RE.search(full):
+        full = _strip_navaid_limitations(full)
     if is_fir:
         if _T1_FIR_RE.search(full): return 1
         if _T2_FIR_RE.search(full): return 2

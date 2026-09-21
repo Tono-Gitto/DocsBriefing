@@ -42,6 +42,119 @@ class TestClassifyTier:
         assert _classify_tier(body, is_fir=True) == expected
 
 
+class TestBoundedNavaidLimitation:
+    """A navaid U/S over a stated radial range or distance band is a limitation on
+    an aid still in service — not an outage — and must not badge T1/T2 alongside a
+    genuine withdrawal. The bound has to be stated geometry; see the "PART" cases in
+    test_unbounded_outage_keeps_tier for the construction that looks similar and
+    isn't. Bodies are the fixture NOTAMs verbatim."""
+
+    @pytest.mark.parametrize("body", [
+        # ZBAA ZBBBE2197/26 (TG664) — the reference case: a distance band.
+        ["DME 36L 'IDK' CH54X LIMITATION:",
+         "DME U/S BTN 11NM-12.5NM,BTN 19NM-22NM FOR ILS/DME APPROACH",
+         "PROCEDURE."],
+        # ZBAA ZBBBE2199/26 (TG664) — same, on an RNAV CAT-I/II procedure.
+        ["DME 01 'INJ' CH22X LIMITED TO USE:",
+         "DME U/S BTN 9NM-10NM ON RNAV CAT-I/II ILS/DME Z RWY01"],
+        # ZSAM ZBBBM1536/26 (TG628) — radial range + a beyond-NM limit. Fires the
+        # \bVOR\b clause as well as \bDME\b, which is why the strip is body-level.
+        ["XINGLIN VOR/DME 'XLN' 114.7MHZ/CH94X LIMITED TO USE:",
+         "1. U/S BTN RADIAL 090DEG-188DEG CLOCKWISE.",
+         "2. U/S BEYOND 43NM ON RADIAL 359DEG FOR ARRIVAL/DEPARTURE",
+         "PROCEDURE."],
+        # ZSPD ZBBBF2442/26 (TG664) — bare radial range, no "LIMITED TO USE" header.
+        ["LIUZAO VOR/DME 'PDL' 109.4MHZ/CH31X U/S BTN RADIAL",
+         "209DEG-213DEG CLOCKWISE."],
+        # ZBAA ZBBBE2190/26 (TG664) — a localizer bounded by distance.
+        ["LOC 19 ILS U/S BEYOND 21.5NM OF FRONT COURSE."],
+        # ZBAA ZBBBE2191/26 (TG664) — bounded by ANGLE, not distance. The bound
+        # reads "BEYOND 010DEG"; an NM-only pattern leaves this one at T1.
+        ["LOC 36R ILS LIMITATION:",
+         "1.U/S BEYOND 010DEG LEFTSIDE OF FRONT COURSE.",
+         "2.U/S BTN 17-28NM BEYOND LEFTSIDE 3.8DEG AND RIGHTSIDE 3.8DEG OF",
+         "FRONT COURSE."],
+        # VLVT VLVTA0091/26 (TG628) — DVOR/DME, two radial ranges.
+        ["XIENGKHOUANG VOR/DME 'THX' 114.00MHZ/CH87X LIMITED TO USE:",
+         "1. DVOR/DME U/S ON RADIAL 042DEG-222DEG CLOCKWISE.",
+         "2. DOVR/DME U/S ON RADIAL 143DEG-323DEG CLOCKWISE."],
+    ])
+    def test_bounded_limitation_is_t3(self, body):
+        assert _classify_tier(body) == 3
+        assert _classify_tier(body, is_fir=True) == 3
+
+    @pytest.mark.parametrize("body,expected", [
+        # WMKK WMKKA2470/26 (TG415) — a real withdrawal. Must stay T1.
+        (["TANJUNG SEPAT DME (DTS) CH 84X WITHDRAWN", "FOR MAINT"], 1),
+        # VTBS THA 00064/25 [3] — DVOR/DME suspended outright, dated. Must stay T1.
+        (["DVOR/DME (SVB) (133932.5N 1004353.2E) (111.4 MHZ, CH51X) temporary",
+          "suspended from 28 November 2024 at 0001 UTC to 02 October 2026"], 1),
+        (["VOR PNH 116.3 U/S"], 1),
+        # "PART" names a COMPONENT of a combined aid, not a fraction of its
+        # coverage — one half failing completely is a real outage. WIDD
+        # WRRRA2129/26 (TG415), EDDB EDDZA6387/25 and LOWW LOWWA2108/26 (TG950).
+        (["ILS/DME CH38X, DME PART U/S DUE TO TECH REASON"], 1),
+        (["LOEWENBERG DVOR/DME LWB 114.55MHZ / CH92Y, DVOR-PART U/S."], 1),
+        (["FUERSTENWALDE VOR/DME FWE 113.3MHZ / CH80X, VOR-PART U/S."], 1),
+        (["DVOR/DME FMD 110.40MHZ/CH41X, VOR PART U/S.",
+          "IF UNABLE TO PERFORM PUBLISHED MISSED APPROACH PROCEDURES BY",
+          "SUPERSEDING FMD DVOR/DME BY RNAV, ADVISE ATC ON INITIAL CONTACT"], 1),
+        (["ILS RWY 25L U/S DUE TO MAINT"], 1),
+    ])
+    def test_unbounded_outage_keeps_tier(self, body, expected):
+        assert _classify_tier(body) == expected
+
+    def test_real_closure_beside_a_limitation_survives(self):
+        """The strip is per statement, so an unrelated genuine closure in the same
+        body still scores. This is what makes a body-level strip safe."""
+        body = ["RWY 28L CLSD DUE WIP.",
+                "DME U/S BTN 9NM-10NM ON ILS/DME APPROACH PROCEDURE."]
+        assert _classify_tier(body) == 1
+
+    @pytest.mark.parametrize("body", [
+        # RJFF RJAAF0920/26 (TG664) — the docs/adr/0006 approach-light fixture.
+        # "PARTLY U/S" on a PALS is NOT a non-event: §8.1.3.3.6 re-determines
+        # landing minima from it and equipment_minima.py reads the 427 m to pick
+        # IALS. Dropping this to T3 would hide a NOTAM with a real minima cost.
+        ["PALS FOR RWY 16L PARTLY U/S DUE TO CONST",
+         "RMK: AVBL APCH LGT LEN 427M"],
+        # RJTT RJAAJ1656/26 (TG677) — six failures in one body, several unbounded.
+        # Also the "NR.4" case: splitting statements on a bare '.' tore the
+        # APCH-GUIDANCE-LGT-to-U/S adjacency apart and silently dropped it to T3.
+        ["RWY-THR-ID-LGT FOR RWY 16L U/S",
+         "SEQUENCED-FLG-LGT FOR RWY 34L U/S",
+         "REDL FOR RWY 16L/34R PARTLY U/S",
+         "APCH-GUIDANCE-LGT FOR RWY 16R/16L(NR.4) U/S",
+         "APCH-GUIDANCE-LGT FOR RWY 16R/16L(NR.6,NR.8) PARTLY U/S",
+         "LIGHTING SYSTEM CAT-2,3 FOR RWY 34R DOWNGRADED TO CAT-1"],
+    ])
+    def test_partial_lighting_failure_is_out_of_scope(self, body):
+        assert _classify_tier(body) == 1
+
+    @pytest.mark.parametrize("body", [
+        # ZGHA ZBBBG2520/26 (TG664) — the limitation is the CAUSE and the
+        # consequence is a published STAR withdrawn. Matching the bare
+        # "LIMITED TO USE" header swallowed the consequence with it.
+        ["\"DUE TO LAOLIANGCANG VOR/DME 'LLC' 116.2MHZ/CH109X LIMITED TO",
+         "USE,",
+         "FLW STAR PROCEDURE U/S:",
+         "STAR RWY36L/R(ZGHA-9B):RUK-01A.\""],
+        # ZGHA ZBBBG2527/26 (TG664) — same shape, two SIDs off an NDB.
+        ["\"DUE TO GUTANG NDB 'W' 388KHZ LIMITED TO USE,FLW SID PROCEDURE",
+         "U/S:",
+         "1.SID RWY36L(ZGHA-7C): OLT-O3D(BY ATC).",
+         "2.SID RWY36R(ZGHA-7D): OLT-04D(BY ATC).\""],
+    ])
+    def test_procedure_withdrawn_by_a_limitation_keeps_tier(self, body):
+        assert _classify_tier(body) == 1
+
+    def test_fir_navaid_limitation_drops_from_t2(self):
+        """Enroute navaid outages are T2 (never T1); a *bounded* one is still T3."""
+        assert _classify_tier(["VOR ABC 114.7 U/S BTN RADIAL 090DEG-188DEG"],
+                              is_fir=True) == 3
+        assert _classify_tier(["VOR ABC 114.7 U/S"], is_fir=True) == 2
+
+
 class TestSplitComInfoParts:
     def test_splits_on_double_dash_with_inline_first_part(self):
         body = [
