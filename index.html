@@ -2202,7 +2202,19 @@ function _destCeilingApplies(entry) {
 // most headwind, gust crosswind when stated, worst case vs the 30 kt limit.
 // The client only renders it, per ADR 0005 §4's seam. Own verdict, never part
 // of Planning Minima's `overall`: a crosswind FAIL is a different test from
-// §8.1.3.2.3/Table 3, and it assumes a dry runway. Gated on role alone, not on
+// §8.1.3.2.3/Table 3, and it assumes a dry runway.
+// Renders three short lines only — runway + wind token, the components, and
+// `effective_kt vs limit`. That last line stays even though it looks like a
+// fourth number to cut: `effective_kt` is the GUST crosswind whenever a gust
+// is stated, and it alone decides the chip. Without it a 14 kt crosswind
+// gusting 25 sits beside a MARGINAL chip against a 30 kt limit with nothing
+// on screen explaining it. The caveats an earlier, wordier version printed in
+// the panel still apply and live here instead: the runway heading is the
+// designator ×10 magnetic (±5°); TAF wind is true and variation is NOT
+// corrected (KNOWN_ISSUES #18 — the marginal band absorbs it); runways under
+// MIN_RUNWAY_M are skipped when a longer one exists; NOTAM runway closures are
+// not considered; and the limit is a dry-runway maximum, to be reduced for a
+// wet or contaminated surface. Gated on role alone, not on
 // wx_tier or findings, because wx_tier ignores wind and a windy GREEN alternate
 // is exactly what the Planning Minima block's own gate would hide.
 const _XWIND_LABEL = { pass: "PASS", marginal: "MARGINAL", fail: "EXCEEDS LIMIT", unknown: "CANNOT DETERMINE" };
@@ -2216,10 +2228,10 @@ function _crosswindHtml(ap, leg, metAttr) {
     // Legacy run (built before the crosswind check): gust advisory only.
     if (leg.applicable_gust_kt === null || leg.applicable_gust_kt === undefined) return "";
     return `<div class="panel-section met-row"${metAttr}>
-      <div class="panel-label">Crosswind check</div>
-      <div class="minima-row eqp-cond">Gusts ${esc(leg.gust_wind)} (${leg.applicable_gust_kt} kt) —
-        check against crosswind limits. OM-A §8.1.6: gusts exceeding crosswind limits are fully applied.</div>
-      <div class="minima-source">Source: ${esc(leg.gust_source || "baseline")} · not evaluated (briefing predates the crosswind check)</div>
+      <div class="panel-label">Crosswind check
+        <span class="minima-verdict ${_XWIND_CLASS.unknown}">${_XWIND_LABEL.unknown}</span>
+      </div>
+      <div class="minima-row">Gusts ${esc(leg.gust_wind)} (${leg.applicable_gust_kt} kt) — not computed</div>
     </div>`;
   }
   if (x.verdict === "unknown") {
@@ -2231,18 +2243,19 @@ function _crosswindHtml(ap, leg, metAttr) {
     </div>`;
   }
   const gust = x.crosswind_gust_kt !== null && x.crosswind_gust_kt !== undefined
-    ? `, gust ${x.crosswind_gust_kt} kt` : "";
-  const detail = x.variable
-    ? `Wind ${esc(x.wind)} is variable — no runway can be favoured, so the full speed is taken as crosswind: ${x.crosswind_kt} kt${gust}`
-    : `RWY ${esc(x.runway)} (${String(x.runway_hdg).padStart(3, "0")}°M) — wind ${esc(x.wind)}: headwind ${x.headwind_kt} kt, crosswind ${x.crosswind_kt} kt${gust}`;
+    ? ` (gust ${x.crosswind_gust_kt} kt)` : "";
+  // `wind` is the raw TAF token, so a VRB wind already says so itself.
+  const rwy = x.variable
+    ? `${esc(x.wind)} · variable`
+    : `RWY ${esc(x.runway)} · ${esc(x.wind)}`;
+  const head = x.variable ? "" : `Head ${x.headwind_kt} kt · `;
   return `<div class="panel-section met-row"${metAttr}>
     <div class="panel-label">Crosswind check
       <span class="minima-verdict ${_XWIND_CLASS[x.verdict]}">${_XWIND_LABEL[x.verdict]}</span>
     </div>
-    <div class="minima-row">${detail}</div>
+    <div class="minima-row">${rwy}</div>
+    <div class="minima-row">${head}Cross ${x.crosswind_kt} kt${gust}</div>
     <div class="minima-row"><span class="req">${x.effective_kt} kt vs limit ${x.limit_kt} kt</span></div>
-    <div class="minima-source">Source: ${esc(x.source)}${x.variable ? "" : " · runway with most headwind for this wind"}</div>
-    <div class="minima-source">Heading = designator ×10 (±5°); TAF wind is true, not corrected for variation. Runways under 2000 m are skipped when a longer one exists; NOTAM runway closures are not considered. ${x.limit_kt} kt is the maximum; reduce for a wet or contaminated runway.</div>
   </div>`;
 }
 
