@@ -326,6 +326,31 @@
       color: #8ec8ff; cursor: pointer; text-decoration: underline;
       font-size: 0.88rem;
     }
+    /* Collapse control on the three regulatory blocks. Floated right of the
+       panel-label so it never displaces the verdict chip beside it — the
+       header line (label + chip) is what survives a collapse.
+       Glyph is –/+ and deliberately NOT ✕: .panel-close is absolutely
+       positioned at the panel's own top-right, so the topmost block's control
+       lands within a fingertip of it, and two identical ✕ glyphs there means a
+       mis-tap closes the whole panel instead of quieting one block. –/+ also
+       reads as "collapse", which is what this actually does. */
+    .block-close {
+      float: right; margin-left: 8px; cursor: pointer;
+      width: 20px; height: 20px; line-height: 18px; text-align: center;
+      margin-top: -2px; border-radius: 4px; position: relative;
+      background: #1a1a2e; border: 1px solid #33365a;
+      color: #8890b0; font-size: 0.8rem; font-weight: 700;
+    }
+    /* The chip stays 20px, but the hit box is the cockpit-standard ~44px
+       (.panel-close's own size) — a fingertip on an iPad, one row below that
+       44px ✕. Grown with a transparent pseudo-element rather than padding, so
+       the visible chip and the 15px panel-label line keep their size, and
+       biased right (into the panel's own 20px gutter) rather than left, where
+       it would start swallowing taps meant for the verdict chip. */
+    .block-close::before {
+      content: ""; position: absolute;
+      top: -12px; bottom: -12px; left: -8px; right: -14px;
+    }
     .minima-form { margin-top: 8px; }
     .minima-form label {
       display: block; font-size: 0.78rem; color: #778; margin: 8px 0 3px;
@@ -2007,6 +2032,47 @@ function _eqpFindingHtml(f, type, anchorKey) {
   </div>`;
 }
 
+// ── Collapsible regulatory blocks ───────────────────────────────────────────
+// Failed Ground Equipment / Planning Minima / Crosswind check are the three
+// densest blocks in the panel, and a crew that has already read one wants it
+// out of the way. Each carries a collapse control keyed per airport+leg+kind,
+// so quieting VTBU's crosswind row leaves VTBS's alone.
+//
+// **It collapses to the header, it never removes the block.** The panel-label
+// line — including the verdict chip (APPROACH NOT AVAILABLE / EXCEEDS LIMIT /
+// FAIL) — always stays on screen; only the body hides. A control that could
+// make a RED verdict vanish entirely is the same class of bug as a silent pass
+// (see _minimaVerdict's `stop` state and _flightSectionParts' "nothing a human
+// touched hides behind a collapse"). Every verdict is collapsible, good or
+// bad — special-casing the bad ones would make the noisiest blocks the only
+// ones that can't be quieted.
+//
+// State is in-memory, not localStorage: a reload defaulting back to full
+// information is the safe direction, and it avoids _tierPersist's
+// read-modify-write multi-tab problem. It is consulted at *render* time, so a
+// repaint from anywhere (a minima save, a marker click, navigateTo) preserves
+// what the crew collapsed.
+const _collapsedBlocks = new Set();
+
+function _blockKey(kind, icao, leg) { return `${kind}|${icao}|${leg}`; }
+
+// One wrapper for all seven block variants across the three functions below —
+// hand-editing each return is how the control goes missing from the rarer
+// shapes (the legacy-gust and "no applicable wind" crosswind rows), which are
+// exactly the least useful ones to be stuck with.
+function _collapsibleBlock(key, labelHtml, bodyHtml, metAttr, extraCls) {
+  const collapsed = _collapsedBlocks.has(key);
+  const bodyId = `blk-${key.replace(/[^A-Za-z0-9]/g, "-")}`;
+  return `<div class="panel-section met-row ${extraCls || ""}"${metAttr}>
+    <div class="panel-label">
+      <span class="block-close" data-minima-action="toggle-block"
+            data-minima-key="${esc(key)}" data-minima-target="${bodyId}"
+            title="${collapsed ? "Show" : "Hide"}">${collapsed ? "+" : "–"}</span>
+      ${labelHtml}</div>
+    <div class="block-body" id="${bodyId}"${collapsed ? " hidden" : ""}>${bodyHtml}</div>
+  </div>`;
+}
+
 function _equipmentBlockHtml(ap, leg, metAttr) {
   const findings = leg.equipment_findings || [];
   if (!findings.length) return "";
@@ -2029,9 +2095,11 @@ function _equipmentBlockHtml(ap, leg, metAttr) {
   const eff = _eqpEffect(applicable, entry);
   const anchorFor = f => _resolveAnchorKey("notam", `${ap.icao}|${f.notam_id}`);
 
-  let head = `<div class="panel-label">Failed Ground Equipment · §8.1.3.3.6`;
+  // Label only — _collapsibleBlock wraps it in the .panel-label that survives
+  // a collapse, so the APPROACH NOT AVAILABLE chip stays visible when the
+  // findings below it are hidden.
+  let head = `Failed Ground Equipment · §8.1.3.3.6`;
   if (eff.stops.length) head += ` <span class="minima-verdict eqp-stop">APPROACH NOT AVAILABLE</span>`;
-  head += `</div>`;
 
   // Shown whenever an entry exists, independent of whether the approach text
   // is set or the arithmetic below resolves — the stored DH/MDH/RVR is always
@@ -2114,9 +2182,10 @@ function _equipmentBlockHtml(ap, leg, metAttr) {
 
   const stopsHtml = eff.stops.map(s => _eqpFindingHtml(s.f, type, anchorFor(s.f))).join("");
 
-  return `<div class="panel-section met-row minima-block eqp-block"${metAttr}>
-    ${head}${approachLine}${stopsHtml}${body}${calc}${ceilingNote}${condHtml}${otherHtml}${consideredHtml}
-  </div>`;
+  return _collapsibleBlock(
+    _blockKey("eqp", ap.icao, leg.leg), head,
+    `${approachLine}${stopsHtml}${body}${calc}${ceilingNote}${condHtml}${otherHtml}${consideredHtml}`,
+    metAttr, "minima-block eqp-block");
 }
 
 // The re-determined RVR for THIS airport-leg, or null when nothing applicable
@@ -2224,23 +2293,19 @@ function _crosswindHtml(ap, leg, metAttr) {
   if (!_minimaRole(ap.icao, leg.leg)) return "";
   const x = leg.crosswind;
   if (x === null) return "";  // no runway line in the MET PDF
+  const key = _blockKey("xwind", ap.icao, leg.leg);
+  const label = v => `Crosswind check
+      <span class="minima-verdict ${_XWIND_CLASS[v]}">${_XWIND_LABEL[v]}</span>`;
   if (x === undefined) {
     // Legacy run (built before the crosswind check): gust advisory only.
     if (leg.applicable_gust_kt === null || leg.applicable_gust_kt === undefined) return "";
-    return `<div class="panel-section met-row"${metAttr}>
-      <div class="panel-label">Crosswind check
-        <span class="minima-verdict ${_XWIND_CLASS.unknown}">${_XWIND_LABEL.unknown}</span>
-      </div>
-      <div class="minima-row">Gusts ${esc(leg.gust_wind)} (${leg.applicable_gust_kt} kt) — not computed</div>
-    </div>`;
+    return _collapsibleBlock(key, label("unknown"),
+      `<div class="minima-row">Gusts ${esc(leg.gust_wind)} (${leg.applicable_gust_kt} kt) — not computed</div>`,
+      metAttr);
   }
   if (x.verdict === "unknown") {
-    return `<div class="panel-section met-row"${metAttr}>
-      <div class="panel-label">Crosswind check
-        <span class="minima-verdict ${_XWIND_CLASS.unknown}">${_XWIND_LABEL.unknown}</span>
-      </div>
-      <div class="no-data">No applicable forecast wind (no TAF)</div>
-    </div>`;
+    return _collapsibleBlock(key, label("unknown"),
+      `<div class="no-data">No applicable forecast wind (no TAF)</div>`, metAttr);
   }
   const gust = x.crosswind_gust_kt !== null && x.crosswind_gust_kt !== undefined
     ? ` (gust ${x.crosswind_gust_kt} kt)` : "";
@@ -2249,14 +2314,11 @@ function _crosswindHtml(ap, leg, metAttr) {
     ? `${esc(x.wind)} · variable`
     : `RWY ${esc(x.runway)} · ${esc(x.wind)}`;
   const head = x.variable ? "" : `Head ${x.headwind_kt} kt · `;
-  return `<div class="panel-section met-row"${metAttr}>
-    <div class="panel-label">Crosswind check
-      <span class="minima-verdict ${_XWIND_CLASS[x.verdict]}">${_XWIND_LABEL[x.verdict]}</span>
-    </div>
-    <div class="minima-row">${rwy}</div>
-    <div class="minima-row">${head}Cross ${x.crosswind_kt} kt${gust}</div>
-    <div class="minima-row"><span class="req">${x.effective_kt} kt vs limit ${x.limit_kt} kt</span></div>
-  </div>`;
+  return _collapsibleBlock(key, label(x.verdict),
+    `<div class="minima-row">${rwy}</div>
+     <div class="minima-row">${head}Cross ${x.crosswind_kt} kt${gust}</div>
+     <div class="minima-row"><span class="req">${x.effective_kt} kt vs limit ${x.limit_kt} kt</span></div>`,
+    metAttr);
 }
 
 // Renders a computed Planning Minima block — identical shape for both roles,
@@ -2296,11 +2358,10 @@ function _minimaResultHtml(ap, leg, entry, c, ceilingIncrement, visIncrement, ro
     ? `<div class="minima-row">RVR/VIS: <span class="req">cannot determine</span> — equipment failure could not be re-determined</div>`
     : `<div class="minima-row">RVR/VIS: <span class="req">${c.baseVis} + ${visIncrement} = ${c.reqVis} m required</span> — forecast ${esc(visText)}</div>${backref}`;
 
-  return `<div class="panel-section met-row minima-block"${metAttr}>
-    <div class="panel-label">Planning Minima
-      <span class="minima-verdict ${_MINIMA_VERDICT_CLASS[c.overall]}">${_MINIMA_VERDICT_LABEL[c.overall]}</span>
-    </div>
-    ${roleLine}
+  return _collapsibleBlock(_blockKey("minima", ap.icao, leg.leg),
+    `Planning Minima
+      <span class="minima-verdict ${_MINIMA_VERDICT_CLASS[c.overall]}">${_MINIMA_VERDICT_LABEL[c.overall]}</span>`,
+    `${roleLine}
     ${c.ceilingApplies
       ? `<div class="minima-row">Ceiling: <span class="req">${entry.base_height_ft} + ${ceilingIncrement} = ${c.reqCeiling} ft required</span> — forecast ${esc(ceilingText)}</div>`
       : `<div class="minima-row">Ceiling: <span class="req">not required — Type B (DH ${entry.base_height_ft} ft &lt; 250); §8.1.3.2.3 sets a ceiling for Type A/circling only</span> — forecast ${esc(ceilingText)}</div>`}
@@ -2309,8 +2370,8 @@ function _minimaResultHtml(ap, leg, entry, c, ceilingIncrement, visIncrement, ro
     <div class="minima-row" style="margin-top:6px">
       ${editLinks.map(el => `<span class="minima-edit" data-minima-action="enter" data-minima-form="${el.form}" data-minima-icao="${esc(ap.icao)}">${esc(el.label)}</span>`).join(" · ")}
     </div>
-    ${disregardedHtml}
-  </div>`;
+    ${disregardedHtml}`,
+    metAttr, "minima-block");
 }
 
 function _minimaBlockHtml(ap, leg, metAttr) {
@@ -2356,13 +2417,12 @@ function _minimaBlockHtml(ap, leg, metAttr) {
   const entry = (stored && Number.isFinite(stored.base_height_ft)
                         && Number.isFinite(stored.base_rvr_vis_m)) ? stored : null;
   if (!entry) {
-    return `<div class="panel-section met-row minima-block"${metAttr}>
-      <div class="panel-label">Planning Minima</div>
-      <div class="no-data">No entry for ${esc(ap.icao)} —
+    return _collapsibleBlock(_blockKey("minima", ap.icao, leg.leg), `Planning Minima`,
+      `<div class="no-data">No entry for ${esc(ap.icao)} —
         <span class="minima-enter" data-minima-action="enter" data-minima-form="equipment" data-minima-icao="${esc(ap.icao)}">Enter minima</span>
       </div>
-      ${disregardedHtml}
-    </div>`;
+      ${disregardedHtml}`,
+      metAttr, "minima-block");
   }
 
   if (role === "destination") {
@@ -2385,16 +2445,15 @@ function _minimaBlockHtml(ap, leg, metAttr) {
   // silently computing the most permissive increment in the table.
   const row = MINIMA_TABLE3.find(r => r.row === entry.row);
   if (!row) {
-    return `<div class="panel-section met-row minima-block"${metAttr}>
-      <div class="panel-label">Planning Minima</div>
-      <div class="no-data">No Table 3 row recorded for ${esc(ap.icao)} —
+    return _collapsibleBlock(_blockKey("minima", ap.icao, leg.leg), `Planning Minima`,
+      `<div class="no-data">No Table 3 row recorded for ${esc(ap.icao)} —
         <span class="minima-enter" data-minima-action="enter" data-minima-form="row" data-minima-icao="${esc(ap.icao)}">Enter minima</span>
       </div>
       <div class="minima-row" style="margin-top:6px">
         <span class="minima-edit" data-minima-action="enter" data-minima-form="equipment" data-minima-icao="${esc(ap.icao)}">Edit DH/MDH</span>
       </div>
-      ${disregardedHtml}
-    </div>`;
+      ${disregardedHtml}`,
+      metAttr, "minima-block");
   }
 
   // Table3's own Edit needs BOTH links, not just the row — under a weather-
@@ -2476,6 +2535,23 @@ function _handleMinimaAction(el) {
   if (action === "toggle-disregarded" || action === "toggle-eqp") {
     const target = document.getElementById(el.dataset.minimaTarget);
     if (target) target.hidden = !target.hidden;
+    return;
+  }
+
+  // Collapse/expand one of the three regulatory blocks. Deliberately does NOT
+  // go via .closest(".minima-block") like the branches below — the crosswind
+  // block has no such class, and that lookup would return null and make its
+  // control silently dead. Same data-minima-target idiom as toggle-eqp: flip
+  // the body's `hidden`, no openPanel repaint, so the header never moves under
+  // the finger. The Set is what makes the state survive the next repaint.
+  if (action === "toggle-block") {
+    const key = el.dataset.minimaKey;
+    const collapsed = !_collapsedBlocks.has(key);
+    if (collapsed) _collapsedBlocks.add(key); else _collapsedBlocks.delete(key);
+    const target = document.getElementById(el.dataset.minimaTarget);
+    if (target) target.hidden = collapsed;
+    el.textContent = collapsed ? "+" : "–";
+    el.title = collapsed ? "Show" : "Hide";
     return;
   }
 
